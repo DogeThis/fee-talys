@@ -106,12 +106,14 @@ namespace MaskTexturePainter
                     e.Use();
                 }
             }
-            
+
             // Handle mouse up anywhere
             if (e.type == EventType.MouseUp && e.button == 0)
             {
                 if (isPainting)
                 {
+                    // End the current paint stroke and flush/save if needed
+                    window.EndPaintStroke();
                     isPainting = false;
                     mouseWasDown = false;
                     e.Use();

@@ -8,10 +8,11 @@
       "url": "https://packages.unity.com"
     },
     "com.divinedragon.builder": {
-      "version": "file:M:/Repos/C#/divine-builder",
+      "version": "https://github.com/DivineDragonFanClub/divine-builder.git",
       "depth": 0,
-      "source": "local",
-      "dependencies": {}
+      "source": "git",
+      "dependencies": {},
+      "hash": "e50c7af8a5fe944a859b4445461cb1dd9ee07478"
     },
     "com.unity.addressables": {
       "version": "1.18.19",

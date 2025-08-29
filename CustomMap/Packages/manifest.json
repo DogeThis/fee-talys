@@ -1,6 +1,6 @@
 {
   "dependencies": {
-    "com.divinedragon.builder": "file:M:/Repos/C#/divine-builder",
+    "com.divinedragon.builder": "https://github.com/DivineDragonFanClub/divine-builder.git",
     "com.unity.addressables": "1.18.19",
     "com.unity.collab-proxy": "1.9.0",
     "com.unity.formats.fbx": "5.1.3",

@@ -41,8 +41,13 @@ namespace MaskTexturePainter
                     
                     if (distance <= brushRadius)
                     {
+                        // Normalize distance from 0 (center) to 1 (edge)
                         float normalizedDistance = distance / brushRadius;
-                        float falloffValue = falloff.Evaluate(1f - normalizedDistance);
+                        
+                        // Apply falloff curve - expecting curve to go from 1 at x=0 (center) to 0 at x=1 (edge)
+                        float falloffValue = falloff.Evaluate(normalizedDistance);
+                        
+                        // Apply brush strength
                         float paintStrength = strength * falloffValue;
                         
                         int pixelIndex = (y - minY) * (maxX - minX + 1) + (x - minX);
