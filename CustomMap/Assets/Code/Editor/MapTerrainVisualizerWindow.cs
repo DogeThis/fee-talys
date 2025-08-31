@@ -64,100 +64,96 @@ namespace Editor
             
             if (tiles.Count == 0) return;
             
-            // Determine label spacing based on camera distance
-            float labelSpacing;
-            if (cameraDistance > 100f) // Far
-                labelSpacing = 10f;
-            else if (cameraDistance > 50f) // Medium-far
-                labelSpacing = 7f;
-            else if (cameraDistance > 25f) // Medium
-                labelSpacing = 5f;
-            else // Close
-                labelSpacing = 3f;
+            // Calculate center of mass first
+            CalculateCenter();
             
-            // For small islands, just use the center of mass
-            if (tiles.Count <= 9)
+            // Check if the center of mass actually falls within our tiles
+            // This handles cases like sea that surrounds land
+            Vector2Int centerInt = new Vector2Int(Mathf.RoundToInt(center.x), Mathf.RoundToInt(center.y));
+            bool centerIsInTiles = tiles.Contains(centerInt);
+            
+            // Also check nearby tiles in case of rounding issues
+            if (!centerIsInTiles)
             {
-                CalculateCenter();
-                labelPositions.Add(center);
-                return;
-            }
-            
-            // For larger islands, find local centers of mass
-            HashSet<Vector2Int> tilesSet = new HashSet<Vector2Int>(tiles);
-            HashSet<Vector2Int> covered = new HashSet<Vector2Int>();
-            
-            // Find bounds
-            int minX = int.MaxValue, maxX = int.MinValue;
-            int minY = int.MaxValue, maxY = int.MinValue;
-            foreach (var tile in tiles)
-            {
-                minX = Mathf.Min(minX, tile.x);
-                maxX = Mathf.Max(maxX, tile.x);
-                minY = Mathf.Min(minY, tile.y);
-                maxY = Mathf.Max(maxY, tile.y);
-            }
-            
-            int spacingInt = Mathf.Max(2, Mathf.FloorToInt(labelSpacing));
-            
-            // Create regions and find their centers of mass
-            for (int y = minY; y <= maxY; y += spacingInt)
-            {
-                for (int x = minX; x <= maxX; x += spacingInt)
+                for (int dx = -1; dx <= 1; dx++)
                 {
-                    // Collect all tiles in this region that aren't already covered
-                    List<Vector2Int> regionTiles = new List<Vector2Int>();
-                    
-                    for (int dy = -spacingInt/2; dy <= spacingInt/2; dy++)
+                    for (int dy = -1; dy <= 1; dy++)
                     {
-                        for (int dx = -spacingInt/2; dx <= spacingInt/2; dx++)
+                        Vector2Int checkPos = new Vector2Int(centerInt.x + dx, centerInt.y + dy);
+                        if (tiles.Contains(checkPos))
                         {
-                            Vector2Int checkPos = new Vector2Int(x + dx, y + dy);
-                            if (tilesSet.Contains(checkPos) && !covered.Contains(checkPos))
-                            {
-                                regionTiles.Add(checkPos);
-                            }
+                            centerIsInTiles = true;
+                            break;
                         }
                     }
-                    
-                    // If we have tiles in this region, find their center of mass
-                    if (regionTiles.Count > 0)
-                    {
-                        // Calculate actual center of mass for this region
-                        float sumX = 0, sumY = 0;
-                        foreach (var tile in regionTiles)
-                        {
-                            sumX += tile.x;
-                            sumY += tile.y;
-                            covered.Add(tile);
-                        }
-                        
-                        Vector2 regionCenter = new Vector2(sumX / regionTiles.Count, sumY / regionTiles.Count);
-                        
-                        // Find the tile closest to the center of mass
-                        Vector2Int bestTile = regionTiles[0];
-                        float bestDist = float.MaxValue;
-                        
-                        foreach (var tile in regionTiles)
-                        {
-                            float dist = Vector2.Distance(regionCenter, new Vector2(tile.x, tile.y));
-                            if (dist < bestDist)
-                            {
-                                bestDist = dist;
-                                bestTile = tile;
-                            }
-                        }
-                        
-                        labelPositions.Add(new Vector2(bestTile.x, bestTile.y));
-                    }
+                    if (centerIsInTiles) break;
                 }
             }
             
-            // If we didn't place any labels, fall back to center
-            if (labelPositions.Count == 0)
+            if (centerIsInTiles)
             {
-                CalculateCenter();
+                // Center is valid, use it
                 labelPositions.Add(center);
+            }
+            else
+            {
+                // Center falls outside our tiles (e.g., sea surrounding land)
+                // Find the largest contiguous section and place label there
+                
+                // Find bounds
+                int minX = int.MaxValue, maxX = int.MinValue;
+                int minY = int.MaxValue, maxY = int.MinValue;
+                foreach (var tile in tiles)
+                {
+                    minX = Mathf.Min(minX, tile.x);
+                    maxX = Mathf.Max(maxX, tile.x);
+                    minY = Mathf.Min(minY, tile.y);
+                    maxY = Mathf.Max(maxY, tile.y);
+                }
+                
+                // Try placing label in corners/edges where we're likely to have solid sections
+                Vector2Int[] candidatePositions = new Vector2Int[]
+                {
+                    new Vector2Int(minX + 2, minY + 2), // Bottom-left
+                    new Vector2Int(maxX - 2, minY + 2), // Bottom-right
+                    new Vector2Int(minX + 2, maxY - 2), // Top-left
+                    new Vector2Int(maxX - 2, maxY - 2), // Top-right
+                    new Vector2Int((minX + maxX) / 2, minY + 2), // Bottom-center
+                    new Vector2Int((minX + maxX) / 2, maxY - 2), // Top-center
+                    new Vector2Int(minX + 2, (minY + maxY) / 2), // Left-center
+                    new Vector2Int(maxX - 2, (minY + maxY) / 2), // Right-center
+                };
+                
+                // Find the candidate that has the most tiles around it
+                Vector2Int bestPosition = tiles.First();
+                int maxNeighbors = 0;
+                
+                foreach (var candidate in candidatePositions)
+                {
+                    if (!tiles.Contains(candidate)) continue;
+                    
+                    // Count tiles in a 5x5 area around this candidate
+                    int neighborCount = 0;
+                    for (int dx = -2; dx <= 2; dx++)
+                    {
+                        for (int dy = -2; dy <= 2; dy++)
+                        {
+                            Vector2Int checkPos = new Vector2Int(candidate.x + dx, candidate.y + dy);
+                            if (tiles.Contains(checkPos))
+                            {
+                                neighborCount++;
+                            }
+                        }
+                    }
+                    
+                    if (neighborCount > maxNeighbors)
+                    {
+                        maxNeighbors = neighborCount;
+                        bestPosition = candidate;
+                    }
+                }
+                
+                labelPositions.Add(new Vector2(bestPosition.x, bestPosition.y));
             }
         }
     }
@@ -203,6 +199,12 @@ namespace Editor
         private static Vector2Int hoveredTile = new Vector2Int(-1, -1);
         private static bool isMouseOverGrid = false;
         
+        // Hover highlight animation
+        private static float hoverHighlightOpacity = 0f;
+        private static float hoverHighlightTargetOpacity = 0f;
+        private static float hoverHighlightFadeSpeed = 5f; // Adjustable fade speed
+        private static float hoverHighlightMaxOpacity = 0.08f; // Maximum opacity for subtle effect (was 0.15f)
+        
         private const string PREFS_PREFIX = "MapTerrainVisualizer_";
         private const string PREFS_ENABLED = PREFS_PREFIX + "Enabled";
         private const string PREFS_SHOW_GRID = PREFS_PREFIX + "ShowGrid";
@@ -239,9 +241,20 @@ namespace Editor
             instance = this;
             SceneView.duringSceneGui -= OnSceneGUI;
             SceneView.duringSceneGui += OnSceneGUI;
+            Undo.undoRedoPerformed -= OnUndoRedo;
+            Undo.undoRedoPerformed += OnUndoRedo;
             LoadSettings();
             RefreshTerrainList();
             LoadTerrainDatabase();
+        }
+        
+        private static void OnUndoRedo()
+        {
+            // Clear island cache when undo/redo is performed
+            // This ensures borders are recalculated after terrain changes
+            islandCache.Clear();
+            lastCachedTerrain = null;
+            SceneView.RepaintAll();
         }
         
         private void LoadTerrainDatabase()
@@ -290,11 +303,13 @@ namespace Editor
         private void OnDisable()
         {
             SceneView.duringSceneGui -= OnSceneGUI;
+            Undo.undoRedoPerformed -= OnUndoRedo;
         }
         
         private void OnDestroy()
         {
             SceneView.duringSceneGui -= OnSceneGUI;
+            Undo.undoRedoPerformed -= OnUndoRedo;
         }
         
         private void LoadSettings()
@@ -731,11 +746,8 @@ namespace Editor
                 lastCameraFOV = currentFOV;
             }
             
-            // Handle mouse input for painting
-            if (paintMode)
-            {
-                HandlePaintingInput(width, height, startX, startZ, y);
-            }
+            // Handle mouse input for hover detection and painting
+            HandleMouseInput(width, height, startX, startZ, y);
             
             // Draw colored tiles if in color mode
             if (displayMode != DisplayMode.TextOnly && terrainDatabase != null)
@@ -828,7 +840,7 @@ namespace Editor
                 }
             }
             
-            // Highlight hovered region
+            // Update hover highlight animation
             if (isMouseOverGrid && hoveredTile.x >= 0 && hoveredTile.y >= 0)
             {
                 int hoveredIndex = hoveredTile.y * width + hoveredTile.x;
@@ -837,13 +849,43 @@ namespace Editor
                     string hoveredTerrainId = selectedTerrain.m_Terrains[hoveredIndex];
                     if (!string.IsNullOrEmpty(hoveredTerrainId))
                     {
+                        // Set target opacity to fade in
+                        hoverHighlightTargetOpacity = hoverHighlightMaxOpacity;
+                        
                         // Find all connected tiles of the same terrain type
                         HashSet<Vector2Int> region = FindConnectedRegion(selectedTerrain, hoveredTile, width, height);
                         
-                        // Draw highlight for the entire region
+                        // Draw highlight for the entire region with animated opacity
                         DrawRegionHighlight(region, startX, startZ, y, hoveredTerrainId);
                     }
+                    else
+                    {
+                        // No terrain at hover position, fade out
+                        hoverHighlightTargetOpacity = 0f;
+                    }
                 }
+                else
+                {
+                    // Outside grid bounds, fade out
+                    hoverHighlightTargetOpacity = 0f;
+                }
+            }
+            else
+            {
+                // Not hovering, fade out
+                hoverHighlightTargetOpacity = 0f;
+            }
+            
+            // Animate the highlight opacity using deltaTime we already calculated
+            if (Mathf.Abs(hoverHighlightOpacity - hoverHighlightTargetOpacity) > 0.001f)
+            {
+                hoverHighlightOpacity = Mathf.Lerp(hoverHighlightOpacity, hoverHighlightTargetOpacity, 
+                    deltaTime * hoverHighlightFadeSpeed);
+                sceneView.Repaint(); // Keep repainting during animation
+            }
+            else
+            {
+                hoverHighlightOpacity = hoverHighlightTargetOpacity; // Snap to target when close
             }
             
             // Draw text labels if not in color-only mode
@@ -853,6 +895,22 @@ namespace Editor
                 style.fontSize = Mathf.RoundToInt(12 * textSize);
                 style.alignment = TextAnchor.MiddleCenter;
                 style.fontStyle = FontStyle.Bold; // Make text bolder for better visibility
+                
+                // Check if we're hovering over a tile and should show hover label
+                bool showHoverLabel = false;
+                string hoveredTerrainId = "";
+                if (isMouseOverGrid && hoveredTile.x >= 0 && hoveredTile.y >= 0)
+                {
+                    int hoveredIndex = hoveredTile.y * width + hoveredTile.x;
+                    if (hoveredIndex < selectedTerrain.m_Terrains.Length)
+                    {
+                        hoveredTerrainId = selectedTerrain.m_Terrains[hoveredIndex];
+                        if (!string.IsNullOrEmpty(hoveredTerrainId))
+                        {
+                            showHoverLabel = true;
+                        }
+                    }
+                }
                 
                 // Use island grouping when enabled and not in hover-only mode
                 if (groupConnectedLabels && !showOnHoverOnly)
@@ -864,6 +922,10 @@ namespace Editor
                     foreach (var island in islands)
                     {
                         if (string.IsNullOrEmpty(island.terrainId))
+                            continue;
+                        
+                        // Skip this island's label if we're hovering over it (will draw hover label instead)
+                        if (showHoverLabel && island.terrainId == hoveredTerrainId)
                             continue;
                         
                         foreach (var labelPos in island.labelPositions)
@@ -943,6 +1005,42 @@ namespace Editor
                         }
                     }
                 }
+                
+                // Draw hover label over the hovered tile
+                if (showHoverLabel)
+                {
+                    float hoverX = startX + hoveredTile.x * TILE_SIZE + TILE_SIZE * 0.5f;
+                    float hoverZ = startZ + hoveredTile.y * TILE_SIZE + TILE_SIZE * 0.5f;
+                    Vector3 hoverPos = new Vector3(hoverX, y, hoverZ);
+                    
+                    string hoverDisplayText = GetTerrainDisplayText(hoveredTerrainId);
+                    
+                    // Add "Sampling:" prefix if in sampling mode
+                    if (paintMode && Event.current.control)
+                    {
+                        hoverDisplayText = "Sampling: " + hoverDisplayText;
+                    }
+                    
+                    // Determine text color for hover label
+                    Color hoverLabelColor = textColor;
+                    if (autoContrastText && displayMode == DisplayMode.Both && terrainDatabase != null)
+                    {
+                        Color tileColor = terrainDatabase.GetTerrainColor(hoveredTerrainId, Color.gray);
+                        hoverLabelColor = GetContrastColor(tileColor);
+                    }
+                    else if (!autoContrastText)
+                    {
+                        hoverLabelColor = textColor;
+                    }
+                    
+                    // Make hover label slightly larger and with a highlight
+                    GUIStyle hoverStyle = new GUIStyle(style);
+                    hoverStyle.fontSize = Mathf.RoundToInt(14 * textSize); // Slightly larger
+                    hoverStyle.normal.textColor = hoverLabelColor;
+                    
+                    // Draw the hover label
+                    DrawLabelWithColoredIcon(hoverPos, hoverDisplayText, hoveredTerrainId, hoverStyle, hoverLabelColor, autoContrastText && displayMode == DisplayMode.Both);
+                }
             }
             
             // Draw brush preview when in paint mode
@@ -957,14 +1055,15 @@ namespace Editor
                 DrawPaintModeOverlay(sceneView);
             }
             
-            // Only repaint when camera is moving or just stopped
-            if (cameraIsMoving || cameraStillTime < 1f)
+            // Repaint when camera is moving, just stopped, or highlight is animating
+            if (cameraIsMoving || cameraStillTime < 1f || 
+                Mathf.Abs(hoverHighlightOpacity - hoverHighlightTargetOpacity) > 0.001f)
             {
                 sceneView.Repaint();
             }
         }
         
-        private static void HandlePaintingInput(int width, int height, float startX, float startZ, float y)
+        private static void HandleMouseInput(int width, int height, float startX, float startZ, float y)
         {
             Event currentEvent = Event.current;
             
@@ -991,28 +1090,32 @@ namespace Editor
                 hoveredTile = new Vector2Int(gridX, gridZ);
                 isMouseOverGrid = true;
                 
-                // Handle mouse clicks
-                if (currentEvent.type == EventType.MouseDown || currentEvent.type == EventType.MouseDrag)
+                // Only handle painting clicks when in paint mode
+                if (paintMode)
                 {
-                    if (currentEvent.button == 0) // Left click
+                    // Handle mouse clicks
+                    if (currentEvent.type == EventType.MouseDown || currentEvent.type == EventType.MouseDrag)
                     {
-                        // Check for modifier keys
-                        if (currentEvent.control && currentEvent.type == EventType.MouseDown) // Ctrl + Left click - pick/sample
+                        if (currentEvent.button == 0) // Left click
                         {
-                            PickTerrain(hoveredTile, width);
+                            // Check for modifier keys
+                            if (currentEvent.control && currentEvent.type == EventType.MouseDown) // Ctrl + Left click - pick/sample
+                            {
+                                PickTerrain(hoveredTile, width);
+                            }
+                            else // Normal left click - paint
+                            {
+                                PaintTerrain(hoveredTile, width, height);
+                            }
+                            currentEvent.Use();
                         }
-                        else // Normal left click - paint
-                        {
-                            PaintTerrain(hoveredTile, width, height);
-                        }
-                        currentEvent.Use();
                     }
-                }
-                
-                // Block scene navigation only for left mouse button
-                if (currentEvent.type == EventType.Layout && currentEvent.button == 0)
-                {
-                    HandleUtility.AddDefaultControl(GUIUtility.GetControlID(FocusType.Passive));
+                    
+                    // Block scene navigation only for left mouse button when painting
+                    if (currentEvent.type == EventType.Layout && currentEvent.button == 0)
+                    {
+                        HandleUtility.AddDefaultControl(GUIUtility.GetControlID(FocusType.Passive));
+                    }
                 }
             }
             else
@@ -1294,9 +1397,10 @@ namespace Editor
         private static void DrawRegionHighlight(HashSet<Vector2Int> region, float startX, float startZ, float y, string terrainId)
         {
             if (region.Count == 0) return;
+            if (hoverHighlightOpacity <= 0.001f) return; // Skip drawing if fully transparent
             
-            // Create a subtle white overlay for lightening effect
-            Color highlightColor = new Color(1f, 1f, 1f, 0.15f); // Very subtle white overlay
+            // Create a subtle white overlay with animated opacity
+            Color highlightColor = new Color(1f, 1f, 1f, hoverHighlightOpacity);
             
             // Draw highlight overlay for each tile in the region
             foreach (var tile in region)
@@ -1315,7 +1419,7 @@ namespace Editor
                 Handles.DrawSolidRectangleWithOutline(verts, highlightColor, Color.clear);
             }
             
-            // Draw a subtle border around the entire region
+            // Draw a subtle border around the entire region with animated opacity
             HashSet<(Vector2Int, Vector2Int)> edges = new HashSet<(Vector2Int, Vector2Int)>();
             
             foreach (var tile in region)
@@ -1351,8 +1455,9 @@ namespace Editor
                 }
             }
             
-            // Draw the border edges with a subtle white color
-            Handles.color = new Color(1f, 1f, 1f, 0.5f); // Subtle white border
+            // Draw the border edges with animated opacity
+            float borderOpacity = Mathf.Min(0.3f, hoverHighlightOpacity * 4f); // Border fades in slightly faster
+            Handles.color = new Color(1f, 1f, 1f, borderOpacity);
             foreach (var edge in edges)
             {
                 Vector3 start = new Vector3(
