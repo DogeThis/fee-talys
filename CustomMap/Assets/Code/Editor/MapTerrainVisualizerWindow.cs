@@ -20,6 +20,148 @@ namespace Editor
         ShowBoth
     }
     
+    // Class to store label information for overlap resolution
+    public class LabelInfo
+    {
+        public Vector3 originalPosition;
+        public Vector3 adjustedPosition;
+        public string terrainId;
+        public string displayText;
+    }
+    
+    // Class to represent a connected group of terrain tiles
+    public class TerrainIsland
+    {
+        public string terrainId;
+        public List<Vector2Int> tiles;
+        public Vector2 center;
+        public List<Vector2> labelPositions;
+        
+        public TerrainIsland(string id)
+        {
+            terrainId = id;
+            tiles = new List<Vector2Int>();
+            labelPositions = new List<Vector2>();
+        }
+        
+        public void CalculateCenter()
+        {
+            if (tiles.Count == 0) return;
+            
+            float sumX = 0;
+            float sumY = 0;
+            foreach (var tile in tiles)
+            {
+                sumX += tile.x;
+                sumY += tile.y;
+            }
+            center = new Vector2(sumX / tiles.Count, sumY / tiles.Count);
+        }
+        
+        public void CalculateLabelPositions(float cameraDistance)
+        {
+            labelPositions.Clear();
+            
+            if (tiles.Count == 0) return;
+            
+            // Determine label spacing based on camera distance
+            float labelSpacing;
+            if (cameraDistance > 100f) // Far
+                labelSpacing = 10f;
+            else if (cameraDistance > 50f) // Medium-far
+                labelSpacing = 7f;
+            else if (cameraDistance > 25f) // Medium
+                labelSpacing = 5f;
+            else // Close
+                labelSpacing = 3f;
+            
+            // For small islands, just use the center of mass
+            if (tiles.Count <= 9)
+            {
+                CalculateCenter();
+                labelPositions.Add(center);
+                return;
+            }
+            
+            // For larger islands, find local centers of mass
+            HashSet<Vector2Int> tilesSet = new HashSet<Vector2Int>(tiles);
+            HashSet<Vector2Int> covered = new HashSet<Vector2Int>();
+            
+            // Find bounds
+            int minX = int.MaxValue, maxX = int.MinValue;
+            int minY = int.MaxValue, maxY = int.MinValue;
+            foreach (var tile in tiles)
+            {
+                minX = Mathf.Min(minX, tile.x);
+                maxX = Mathf.Max(maxX, tile.x);
+                minY = Mathf.Min(minY, tile.y);
+                maxY = Mathf.Max(maxY, tile.y);
+            }
+            
+            int spacingInt = Mathf.Max(2, Mathf.FloorToInt(labelSpacing));
+            
+            // Create regions and find their centers of mass
+            for (int y = minY; y <= maxY; y += spacingInt)
+            {
+                for (int x = minX; x <= maxX; x += spacingInt)
+                {
+                    // Collect all tiles in this region that aren't already covered
+                    List<Vector2Int> regionTiles = new List<Vector2Int>();
+                    
+                    for (int dy = -spacingInt/2; dy <= spacingInt/2; dy++)
+                    {
+                        for (int dx = -spacingInt/2; dx <= spacingInt/2; dx++)
+                        {
+                            Vector2Int checkPos = new Vector2Int(x + dx, y + dy);
+                            if (tilesSet.Contains(checkPos) && !covered.Contains(checkPos))
+                            {
+                                regionTiles.Add(checkPos);
+                            }
+                        }
+                    }
+                    
+                    // If we have tiles in this region, find their center of mass
+                    if (regionTiles.Count > 0)
+                    {
+                        // Calculate actual center of mass for this region
+                        float sumX = 0, sumY = 0;
+                        foreach (var tile in regionTiles)
+                        {
+                            sumX += tile.x;
+                            sumY += tile.y;
+                            covered.Add(tile);
+                        }
+                        
+                        Vector2 regionCenter = new Vector2(sumX / regionTiles.Count, sumY / regionTiles.Count);
+                        
+                        // Find the tile closest to the center of mass
+                        Vector2Int bestTile = regionTiles[0];
+                        float bestDist = float.MaxValue;
+                        
+                        foreach (var tile in regionTiles)
+                        {
+                            float dist = Vector2.Distance(regionCenter, new Vector2(tile.x, tile.y));
+                            if (dist < bestDist)
+                            {
+                                bestDist = dist;
+                                bestTile = tile;
+                            }
+                        }
+                        
+                        labelPositions.Add(new Vector2(bestTile.x, bestTile.y));
+                    }
+                }
+            }
+            
+            // If we didn't place any labels, fall back to center
+            if (labelPositions.Count == 0)
+            {
+                CalculateCenter();
+                labelPositions.Add(center);
+            }
+        }
+    }
+    
     public class MapTerrainVisualizerWindow : EditorWindow
     {
         private static MapTerrainVisualizerWindow instance;
@@ -38,6 +180,21 @@ namespace Editor
         private static bool autoContrastText = true;
         private static TextDisplayMode textDisplayMode = TextDisplayMode.ShowTID;
         private static bool showOnHoverOnly = false;
+        private static bool groupConnectedLabels = true;
+        
+        // Island caching for smooth transitions
+        private static Dictionary<MapTerrain, List<TerrainIsland>> islandCache = new Dictionary<MapTerrain, List<TerrainIsland>>();
+        private static MapTerrain lastCachedTerrain = null;
+        private static float lastIslandCameraDistance = -1f;
+        private static float lastFrameTime = 0f;
+        
+        // Camera movement detection
+        private static Vector3 lastCameraPosition;
+        private static Quaternion lastCameraRotation;
+        private static float lastCameraFOV;
+        private static float cameraStillTime = 0f;
+        private static bool cameraIsMoving = false;
+        private const float CAMERA_STILL_THRESHOLD = 0.3f; // Wait this long after camera stops
         
         // Brush painting variables
         private static bool paintMode = false;
@@ -59,6 +216,7 @@ namespace Editor
         private const string PREFS_COLOR_OPACITY = PREFS_PREFIX + "ColorOpacity";
         private const string PREFS_COLOR_BRIGHTNESS = PREFS_PREFIX + "ColorBrightness";
         private const string PREFS_AUTO_CONTRAST = PREFS_PREFIX + "AutoContrast";
+        private const string PREFS_GROUP_CONNECTED = PREFS_PREFIX + "GroupConnected";
         
         private Vector2 scrollPosition;
         private List<MapTerrain> availableTerrains = new List<MapTerrain>();
@@ -97,16 +255,34 @@ namespace Editor
         
         private static Color GetContrastColor(Color backgroundColor)
         {
-            // Calculate luminance using the relative luminance formula
-            float luminance = 0.299f * backgroundColor.r + 0.587f * backgroundColor.g + 0.114f * backgroundColor.b;
+            // Calculate perceived luminance using the relative luminance formula
+            // Using gamma-corrected values for better accuracy
+            float r = backgroundColor.r;
+            float g = backgroundColor.g;
+            float b = backgroundColor.b;
             
-            // If the background is dark, use white; if light, use black
-            if (luminance > 0.5f)
+            // Apply gamma correction for more accurate luminance calculation
+            r = r <= 0.03928f ? r / 12.92f : Mathf.Pow((r + 0.055f) / 1.055f, 2.4f);
+            g = g <= 0.03928f ? g / 12.92f : Mathf.Pow((g + 0.055f) / 1.055f, 2.4f);
+            b = b <= 0.03928f ? b / 12.92f : Mathf.Pow((b + 0.055f) / 1.055f, 2.4f);
+            
+            // Calculate relative luminance
+            float luminance = 0.2126f * r + 0.7152f * g + 0.0722f * b;
+            
+            // For mid-range colors, check if we need to add an outline
+            if (luminance > 0.4f && luminance < 0.6f)
             {
+                // For mid-range brightness, prefer white with black outline (handled in DrawLabelWithColoredIcon)
+                return Color.white;
+            }
+            else if (luminance > 0.45f)
+            {
+                // For lighter backgrounds, use black
                 return Color.black;
             }
             else
             {
+                // For darker backgrounds, use white
                 return Color.white;
             }
         }
@@ -131,6 +307,7 @@ namespace Editor
             colorOpacity = EditorPrefs.GetFloat(PREFS_COLOR_OPACITY, 0.5f);
             colorBrightness = EditorPrefs.GetFloat(PREFS_COLOR_BRIGHTNESS, 1.0f);
             autoContrastText = EditorPrefs.GetBool(PREFS_AUTO_CONTRAST, true);
+            groupConnectedLabels = EditorPrefs.GetBool(PREFS_GROUP_CONNECTED, true);
             
             string colorStr = EditorPrefs.GetString(PREFS_TEXT_COLOR, ColorUtility.ToHtmlStringRGBA(Color.white));
             ColorUtility.TryParseHtmlString("#" + colorStr, out textColor);
@@ -160,6 +337,7 @@ namespace Editor
             EditorPrefs.SetFloat(PREFS_COLOR_OPACITY, colorOpacity);
             EditorPrefs.SetFloat(PREFS_COLOR_BRIGHTNESS, colorBrightness);
             EditorPrefs.SetBool(PREFS_AUTO_CONTRAST, autoContrastText);
+            EditorPrefs.SetBool(PREFS_GROUP_CONNECTED, groupConnectedLabels);
             EditorPrefs.SetString(PREFS_TEXT_COLOR, ColorUtility.ToHtmlStringRGBA(textColor));
             EditorPrefs.SetString(PREFS_GRID_COLOR, ColorUtility.ToHtmlStringRGBA(gridColor));
             EditorPrefs.SetFloat(PREFS_WORLD_OFFSET + "_X", worldOffset.x);
@@ -298,6 +476,17 @@ namespace Editor
                 EditorGUILayout.LabelField("Text Settings", EditorStyles.miniBoldLabel);
                 textDisplayMode = (TextDisplayMode)EditorGUILayout.EnumPopup("Text Display", textDisplayMode);
                 showOnHoverOnly = EditorGUILayout.Toggle("Show on Hover Only", showOnHoverOnly);
+                
+                // Disable grouping when hover-only is enabled
+                EditorGUI.BeginDisabledGroup(showOnHoverOnly);
+                groupConnectedLabels = EditorGUILayout.Toggle("Group Connected Labels", groupConnectedLabels);
+                EditorGUI.EndDisabledGroup();
+                
+                if (showOnHoverOnly && groupConnectedLabels)
+                {
+                    EditorGUILayout.HelpBox("Label grouping is disabled in hover-only mode", MessageType.Info);
+                }
+                
                 textSize = EditorGUILayout.Slider("Text Size", textSize, 0.1f, 2f);
                 autoContrastText = EditorGUILayout.Toggle("Auto Contrast Text", autoContrastText);
                 if (!autoContrastText)
@@ -479,6 +668,16 @@ namespace Editor
             EditorGUILayout.EndScrollView();
         }
         
+        private static float GetCameraDistance(SceneView sceneView, float terrainCenterX, float terrainCenterZ, float terrainY)
+        {
+            if (sceneView == null || sceneView.camera == null)
+                return 50f; // Default medium distance
+            
+            Vector3 terrainCenter = new Vector3(terrainCenterX, terrainY, terrainCenterZ);
+            Vector3 cameraPos = sceneView.camera.transform.position;
+            return Vector3.Distance(cameraPos, terrainCenter);
+        }
+        
         private static void OnSceneGUI(SceneView sceneView)
         {
             if (!visualizationEnabled || selectedTerrain == null || selectedTerrain.m_Terrains == null)
@@ -489,6 +688,48 @@ namespace Editor
             float startX = selectedTerrain.m_X + worldOffset.x;
             float startZ = selectedTerrain.m_Z + worldOffset.z;
             float y = worldOffset.y;
+            
+            // Calculate camera distance for zoom-aware rendering
+            float terrainCenterX = startX + (width * TILE_SIZE) / 2f;
+            float terrainCenterZ = startZ + (height * TILE_SIZE) / 2f;
+            float cameraDistance = GetCameraDistance(sceneView, terrainCenterX, terrainCenterZ, y);
+            
+            // Calculate frame delta time for smooth interpolation
+            float currentTime = (float)EditorApplication.timeSinceStartup;
+            float deltaTime = Mathf.Min(currentTime - lastFrameTime, 0.1f); // Cap at 100ms
+            lastFrameTime = currentTime;
+            
+            // Detect camera movement
+            bool cameraChanged = false;
+            if (sceneView.camera != null)
+            {
+                Vector3 currentCamPos = sceneView.camera.transform.position;
+                Quaternion currentCamRot = sceneView.camera.transform.rotation;
+                float currentFOV = sceneView.camera.fieldOfView;
+                
+                // Check if camera has moved
+                if (Vector3.Distance(currentCamPos, lastCameraPosition) > 0.01f ||
+                    Quaternion.Angle(currentCamRot, lastCameraRotation) > 0.1f ||
+                    Mathf.Abs(currentFOV - lastCameraFOV) > 0.1f)
+                {
+                    cameraChanged = true;
+                    cameraIsMoving = true;
+                    cameraStillTime = 0f;
+                }
+                else
+                {
+                    // Camera hasn't moved this frame
+                    cameraStillTime += deltaTime;
+                    if (cameraStillTime > CAMERA_STILL_THRESHOLD)
+                    {
+                        cameraIsMoving = false;
+                    }
+                }
+                
+                lastCameraPosition = currentCamPos;
+                lastCameraRotation = currentCamRot;
+                lastCameraFOV = currentFOV;
+            }
             
             // Handle mouse input for painting
             if (paintMode)
@@ -562,6 +803,49 @@ namespace Editor
                 }
             }
             
+            // Draw island borders when grouping is enabled (always draw borders, regardless of hover mode)
+            if (groupConnectedLabels && terrainDatabase != null)
+            {
+                // Get cached islands or create new ones
+                List<TerrainIsland> islands = GetOrCreateIslands(selectedTerrain, cameraDistance);
+                
+                foreach (var island in islands)
+                {
+                    if (string.IsNullOrEmpty(island.terrainId))
+                        continue;
+                    
+                    // Get the base color for this terrain and darken it for the border
+                    Color baseColor = terrainDatabase.GetTerrainColor(island.terrainId, Color.gray);
+                    Color borderColor = new Color(
+                        baseColor.r * 0.6f,
+                        baseColor.g * 0.6f,
+                        baseColor.b * 0.6f,
+                        1f
+                    );
+                    
+                    // Draw borders around the island
+                    DrawIslandBorders(island, width, height, startX, startZ, y, borderColor);
+                }
+            }
+            
+            // Highlight hovered region
+            if (isMouseOverGrid && hoveredTile.x >= 0 && hoveredTile.y >= 0)
+            {
+                int hoveredIndex = hoveredTile.y * width + hoveredTile.x;
+                if (hoveredIndex < selectedTerrain.m_Terrains.Length)
+                {
+                    string hoveredTerrainId = selectedTerrain.m_Terrains[hoveredIndex];
+                    if (!string.IsNullOrEmpty(hoveredTerrainId))
+                    {
+                        // Find all connected tiles of the same terrain type
+                        HashSet<Vector2Int> region = FindConnectedRegion(selectedTerrain, hoveredTile, width, height);
+                        
+                        // Draw highlight for the entire region
+                        DrawRegionHighlight(region, startX, startZ, y, hoveredTerrainId);
+                    }
+                }
+            }
+            
             // Draw text labels if not in color-only mode
             if (displayMode != DisplayMode.ColorOnly)
             {
@@ -570,62 +854,93 @@ namespace Editor
                 style.alignment = TextAnchor.MiddleCenter;
                 style.fontStyle = FontStyle.Bold; // Make text bolder for better visibility
                 
-                for (int row = 0; row < height; row++)
+                // Use island grouping when enabled and not in hover-only mode
+                if (groupConnectedLabels && !showOnHoverOnly)
                 {
-                    for (int col = 0; col < width; col++)
+                    // Get cached islands (already retrieved above for borders)
+                    List<TerrainIsland> islands = GetOrCreateIslands(selectedTerrain, cameraDistance);
+                    
+                    // Draw labels at their natural positions
+                    foreach (var island in islands)
                     {
-                        // Skip if hover-only mode and not hovering this tile
-                        if (showOnHoverOnly)
-                        {
-                            if (!isMouseOverGrid || hoveredTile.x != col || hoveredTile.y != row)
-                                continue;
-                        }
-                        
-                        int index = row * width + col;
-                        
-                        if (index >= selectedTerrain.m_Terrains.Length)
-                            break;
-                        
-                        string terrainId = selectedTerrain.m_Terrains[index];
-                        
-                        if (string.IsNullOrEmpty(terrainId))
+                        if (string.IsNullOrEmpty(island.terrainId))
                             continue;
                         
-                        // Determine text color based on background
-                        Color labelColor = textColor;
-                        if (autoContrastText && displayMode == DisplayMode.Both && terrainDatabase != null)
+                        foreach (var labelPos in island.labelPositions)
                         {
-                            Color tileColor = terrainDatabase.GetTerrainColor(terrainId, Color.gray);
-                            labelColor = GetContrastColor(tileColor);
-                        }
-                        else if (!autoContrastText)
-                        {
-                            labelColor = textColor;
-                        }
-                        
-                        style.normal.textColor = labelColor;
-                        
-                        float centerX = startX + col * TILE_SIZE + TILE_SIZE * 0.5f;
-                        float centerZ = startZ + row * TILE_SIZE + TILE_SIZE * 0.5f;
-                        Vector3 position = new Vector3(centerX, y, centerZ);
-                        
-                        // Get display text based on mode
-                        string displayText = GetTerrainDisplayText(terrainId);
-                        
-                        
-                        // Draw text with outline for better visibility
-                        if (autoContrastText && displayMode == DisplayMode.Both)
-                        {
-                            // Draw shadow/outline for better readability
-                            Color shadowColor = labelColor == Color.white ? new Color(0, 0, 0, 0.5f) : new Color(1, 1, 1, 0.5f);
-                            GUIStyle shadowStyle = new GUIStyle(style);
-                            shadowStyle.normal.textColor = shadowColor;
+                            float centerX = startX + labelPos.x * TILE_SIZE + TILE_SIZE * 0.5f;
+                            float centerZ = startZ + labelPos.y * TILE_SIZE + TILE_SIZE * 0.5f;
+                            Vector3 worldPos = new Vector3(centerX, y, centerZ);
                             
-                            float shadowOffset = 0.05f;
-                            Handles.Label(position + new Vector3(shadowOffset, 0, shadowOffset), displayText, shadowStyle);
+                            string displayText = GetTerrainDisplayText(island.terrainId);
+                            
+                            // Determine text color based on background
+                            Color labelColor = textColor;
+                            if (autoContrastText && displayMode == DisplayMode.Both && terrainDatabase != null)
+                            {
+                                Color tileColor = terrainDatabase.GetTerrainColor(island.terrainId, Color.gray);
+                                labelColor = GetContrastColor(tileColor);
+                            }
+                            else if (!autoContrastText)
+                            {
+                                labelColor = textColor;
+                            }
+                            
+                            style.normal.textColor = labelColor;
+                            
+                            // Draw colored icon with the label
+                            DrawLabelWithColoredIcon(worldPos, displayText, island.terrainId, style, labelColor, autoContrastText && displayMode == DisplayMode.Both);
                         }
-                        
-                        Handles.Label(position, displayText, style);
+                    }
+                }
+                else
+                {
+                    // Original per-tile labeling
+                    for (int row = 0; row < height; row++)
+                    {
+                        for (int col = 0; col < width; col++)
+                        {
+                            // Skip if hover-only mode and not hovering this tile
+                            if (showOnHoverOnly)
+                            {
+                                if (!isMouseOverGrid || hoveredTile.x != col || hoveredTile.y != row)
+                                    continue;
+                            }
+                            
+                            int index = row * width + col;
+                            
+                            if (index >= selectedTerrain.m_Terrains.Length)
+                                break;
+                            
+                            string terrainId = selectedTerrain.m_Terrains[index];
+                            
+                            if (string.IsNullOrEmpty(terrainId))
+                                continue;
+                            
+                            // Determine text color based on background
+                            Color labelColor = textColor;
+                            if (autoContrastText && displayMode == DisplayMode.Both && terrainDatabase != null)
+                            {
+                                Color tileColor = terrainDatabase.GetTerrainColor(terrainId, Color.gray);
+                                labelColor = GetContrastColor(tileColor);
+                            }
+                            else if (!autoContrastText)
+                            {
+                                labelColor = textColor;
+                            }
+                            
+                            style.normal.textColor = labelColor;
+                            
+                            float centerX = startX + col * TILE_SIZE + TILE_SIZE * 0.5f;
+                            float centerZ = startZ + row * TILE_SIZE + TILE_SIZE * 0.5f;
+                            Vector3 position = new Vector3(centerX, y, centerZ);
+                            
+                            // Get display text based on mode
+                            string displayText = GetTerrainDisplayText(terrainId);
+                            
+                            // Draw colored icon with the label
+                            DrawLabelWithColoredIcon(position, displayText, terrainId, style, labelColor, autoContrastText && displayMode == DisplayMode.Both);
+                        }
                     }
                 }
             }
@@ -640,6 +955,12 @@ namespace Editor
             if (paintMode)
             {
                 DrawPaintModeOverlay(sceneView);
+            }
+            
+            // Only repaint when camera is moving or just stopped
+            if (cameraIsMoving || cameraStillTime < 1f)
+            {
+                sceneView.Repaint();
             }
         }
         
@@ -868,6 +1189,11 @@ namespace Editor
             if (modified)
             {
                 EditorUtility.SetDirty(selectedTerrain);
+                // Clear island cache when terrain is modified
+                if (islandCache.ContainsKey(selectedTerrain))
+                {
+                    islandCache.Remove(selectedTerrain);
+                }
                 SceneView.RepaintAll();
             }
         }
@@ -908,6 +1234,384 @@ namespace Editor
                     instance.Repaint();
                 }
             }
+        }
+        
+        
+        private static HashSet<Vector2Int> FindConnectedRegion(MapTerrain terrain, Vector2Int startTile, int width, int height)
+        {
+            HashSet<Vector2Int> region = new HashSet<Vector2Int>();
+            int startIndex = startTile.y * width + startTile.x;
+            
+            if (startIndex >= terrain.m_Terrains.Length)
+                return region;
+                
+            string targetTerrain = terrain.m_Terrains[startIndex];
+            if (string.IsNullOrEmpty(targetTerrain))
+                return region;
+            
+            Queue<Vector2Int> toVisit = new Queue<Vector2Int>();
+            HashSet<Vector2Int> visited = new HashSet<Vector2Int>();
+            
+            toVisit.Enqueue(startTile);
+            visited.Add(startTile);
+            
+            // 4-way connectivity
+            Vector2Int[] directions = new Vector2Int[]
+            {
+                new Vector2Int(0, 1),   // up
+                new Vector2Int(0, -1),  // down
+                new Vector2Int(1, 0),   // right
+                new Vector2Int(-1, 0)   // left
+            };
+            
+            while (toVisit.Count > 0)
+            {
+                Vector2Int current = toVisit.Dequeue();
+                region.Add(current);
+                
+                foreach (var dir in directions)
+                {
+                    Vector2Int neighbor = current + dir;
+                    
+                    if (neighbor.x >= 0 && neighbor.x < width &&
+                        neighbor.y >= 0 && neighbor.y < height &&
+                        !visited.Contains(neighbor))
+                    {
+                        int neighborIndex = neighbor.y * width + neighbor.x;
+                        if (neighborIndex < terrain.m_Terrains.Length &&
+                            terrain.m_Terrains[neighborIndex] == targetTerrain)
+                        {
+                            visited.Add(neighbor);
+                            toVisit.Enqueue(neighbor);
+                        }
+                    }
+                }
+            }
+            
+            return region;
+        }
+        
+        private static void DrawRegionHighlight(HashSet<Vector2Int> region, float startX, float startZ, float y, string terrainId)
+        {
+            if (region.Count == 0) return;
+            
+            // Create a subtle white overlay for lightening effect
+            Color highlightColor = new Color(1f, 1f, 1f, 0.15f); // Very subtle white overlay
+            
+            // Draw highlight overlay for each tile in the region
+            foreach (var tile in region)
+            {
+                float tileX = startX + tile.x * TILE_SIZE;
+                float tileZ = startZ + tile.y * TILE_SIZE;
+                
+                Vector3[] verts = new Vector3[]
+                {
+                    new Vector3(tileX, y + 0.02f, tileZ),
+                    new Vector3(tileX + TILE_SIZE, y + 0.02f, tileZ),
+                    new Vector3(tileX + TILE_SIZE, y + 0.02f, tileZ + TILE_SIZE),
+                    new Vector3(tileX, y + 0.02f, tileZ + TILE_SIZE)
+                };
+                
+                Handles.DrawSolidRectangleWithOutline(verts, highlightColor, Color.clear);
+            }
+            
+            // Draw a subtle border around the entire region
+            HashSet<(Vector2Int, Vector2Int)> edges = new HashSet<(Vector2Int, Vector2Int)>();
+            
+            foreach (var tile in region)
+            {
+                // Check each edge
+                Vector2Int[] neighbors = new Vector2Int[]
+                {
+                    tile + new Vector2Int(0, 1),   // top
+                    tile + new Vector2Int(1, 0),   // right
+                    tile + new Vector2Int(0, -1),  // bottom
+                    tile + new Vector2Int(-1, 0)   // left
+                };
+                
+                // Top edge
+                if (!region.Contains(neighbors[0]))
+                {
+                    edges.Add((new Vector2Int(tile.x, tile.y + 1), new Vector2Int(tile.x + 1, tile.y + 1)));
+                }
+                // Right edge
+                if (!region.Contains(neighbors[1]))
+                {
+                    edges.Add((new Vector2Int(tile.x + 1, tile.y), new Vector2Int(tile.x + 1, tile.y + 1)));
+                }
+                // Bottom edge
+                if (!region.Contains(neighbors[2]))
+                {
+                    edges.Add((new Vector2Int(tile.x, tile.y), new Vector2Int(tile.x + 1, tile.y)));
+                }
+                // Left edge
+                if (!region.Contains(neighbors[3]))
+                {
+                    edges.Add((new Vector2Int(tile.x, tile.y), new Vector2Int(tile.x, tile.y + 1)));
+                }
+            }
+            
+            // Draw the border edges with a subtle white color
+            Handles.color = new Color(1f, 1f, 1f, 0.5f); // Subtle white border
+            foreach (var edge in edges)
+            {
+                Vector3 start = new Vector3(
+                    startX + edge.Item1.x * TILE_SIZE,
+                    y + 0.03f,
+                    startZ + edge.Item1.y * TILE_SIZE
+                );
+                Vector3 end = new Vector3(
+                    startX + edge.Item2.x * TILE_SIZE,
+                    y + 0.03f,
+                    startZ + edge.Item2.y * TILE_SIZE
+                );
+                
+                Handles.DrawLine(start, end, 3f);
+            }
+        }
+        
+        private static void DrawLabelWithColoredIcon(Vector3 position, string text, string terrainId, GUIStyle textStyle, Color textColor, bool drawShadow)
+        {
+            Handles.BeginGUI();
+            
+            // Convert world position to GUI position
+            Vector2 guiPos = HandleUtility.WorldToGUIPoint(position);
+            
+            // Calculate text dimensions
+            GUIContent content = new GUIContent(text);
+            Vector2 textSize = textStyle.CalcSize(content);
+            
+            // Add padding for the colored icon
+            float iconSize = 8f;
+            float iconPadding = 3f;
+            float totalWidth = textSize.x + iconSize + iconPadding * 2;
+            
+            // Position for the whole label (centered)
+            Rect labelRect = new Rect(guiPos.x - totalWidth / 2, guiPos.y - textSize.y / 2, totalWidth, textSize.y);
+            
+            // Always draw an outline for better readability
+            // Draw multiple outline passes for stronger effect
+            GUIStyle outlineStyle = new GUIStyle(textStyle);
+            Color outlineColor = (textColor == Color.black) ? Color.white : Color.black;
+            outlineStyle.normal.textColor = new Color(outlineColor.r, outlineColor.g, outlineColor.b, 0.8f);
+            
+            // Draw outline in 8 directions for better coverage
+            Vector2[] outlineOffsets = new Vector2[]
+            {
+                new Vector2(-1, -1), new Vector2(0, -1), new Vector2(1, -1),
+                new Vector2(-1, 0),                      new Vector2(1, 0),
+                new Vector2(-1, 1),  new Vector2(0, 1),  new Vector2(1, 1)
+            };
+            
+            foreach (var offset in outlineOffsets)
+            {
+                Rect outlineTextRect = new Rect(
+                    labelRect.x + iconSize + iconPadding * 2 + offset.x, 
+                    labelRect.y + offset.y, 
+                    textSize.x, 
+                    labelRect.height
+                );
+                GUI.Label(outlineTextRect, text, outlineStyle);
+                
+                // Draw outline for icon too
+                if (terrainDatabase != null)
+                {
+                    Rect outlineIconRect = new Rect(
+                        labelRect.x + iconPadding + offset.x, 
+                        labelRect.y + (labelRect.height - iconSize) / 2 + offset.y, 
+                        iconSize, 
+                        iconSize
+                    );
+                    EditorGUI.DrawRect(outlineIconRect, new Color(outlineColor.r, outlineColor.g, outlineColor.b, 0.3f));
+                }
+            }
+            
+            // Draw colored icon
+            if (terrainDatabase != null)
+            {
+                Color terrainColor = terrainDatabase.GetTerrainColor(terrainId, Color.gray);
+                Rect iconRect = new Rect(labelRect.x + iconPadding, 
+                    labelRect.y + (labelRect.height - iconSize) / 2, iconSize, iconSize);
+                
+                // Draw icon background
+                EditorGUI.DrawRect(iconRect, terrainColor);
+                
+                // Draw icon border for clarity
+                Color borderColor = (textColor == Color.black) ? Color.black : Color.white;
+                Handles.DrawBezier(
+                    new Vector3(iconRect.x, iconRect.y, 0),
+                    new Vector3(iconRect.x + iconSize, iconRect.y, 0),
+                    new Vector3(iconRect.x, iconRect.y, 0),
+                    new Vector3(iconRect.x + iconSize, iconRect.y, 0),
+                    borderColor, null, 1f
+                );
+            }
+            
+            // Draw the text on top
+            textStyle.normal.textColor = textColor;
+            Rect textRect = new Rect(labelRect.x + iconSize + iconPadding * 2, labelRect.y, 
+                textSize.x, labelRect.height);
+            GUI.Label(textRect, text, textStyle);
+            
+            Handles.EndGUI();
+        }
+        
+        private static void DrawIslandBorders(TerrainIsland island, int mapWidth, int mapHeight, float startX, float startZ, float y, Color borderColor)
+        {
+            Handles.color = borderColor;
+            float borderThickness = 3f;
+            
+            // Create a set for quick lookup
+            HashSet<Vector2Int> islandTiles = new HashSet<Vector2Int>(island.tiles);
+            
+            // Check each tile in the island for border edges
+            foreach (var tile in island.tiles)
+            {
+                float tileX = startX + tile.x * TILE_SIZE;
+                float tileZ = startZ + tile.y * TILE_SIZE;
+                
+                // Check all 4 edges
+                // Top edge (z+)
+                if (tile.y >= mapHeight - 1 || !islandTiles.Contains(new Vector2Int(tile.x, tile.y + 1)))
+                {
+                    Vector3 lineStart = new Vector3(tileX, y + 0.02f, tileZ + TILE_SIZE);
+                    Vector3 lineEnd = new Vector3(tileX + TILE_SIZE, y + 0.02f, tileZ + TILE_SIZE);
+                    Handles.DrawLine(lineStart, lineEnd, borderThickness);
+                }
+                
+                // Right edge (x+)
+                if (tile.x >= mapWidth - 1 || !islandTiles.Contains(new Vector2Int(tile.x + 1, tile.y)))
+                {
+                    Vector3 lineStart = new Vector3(tileX + TILE_SIZE, y + 0.02f, tileZ);
+                    Vector3 lineEnd = new Vector3(tileX + TILE_SIZE, y + 0.02f, tileZ + TILE_SIZE);
+                    Handles.DrawLine(lineStart, lineEnd, borderThickness);
+                }
+                
+                // Bottom edge (z-)
+                if (tile.y <= 0 || !islandTiles.Contains(new Vector2Int(tile.x, tile.y - 1)))
+                {
+                    Vector3 lineStart = new Vector3(tileX, y + 0.02f, tileZ);
+                    Vector3 lineEnd = new Vector3(tileX + TILE_SIZE, y + 0.02f, tileZ);
+                    Handles.DrawLine(lineStart, lineEnd, borderThickness);
+                }
+                
+                // Left edge (x-)
+                if (tile.x <= 0 || !islandTiles.Contains(new Vector2Int(tile.x - 1, tile.y)))
+                {
+                    Vector3 lineStart = new Vector3(tileX, y + 0.02f, tileZ);
+                    Vector3 lineEnd = new Vector3(tileX, y + 0.02f, tileZ + TILE_SIZE);
+                    Handles.DrawLine(lineStart, lineEnd, borderThickness);
+                }
+            }
+        }
+        
+        private static List<TerrainIsland> GetOrCreateIslands(MapTerrain terrain, float cameraDistance)
+        {
+            // Check if terrain changed or we need to rebuild
+            if (terrain != lastCachedTerrain || !islandCache.ContainsKey(terrain))
+            {
+                // Terrain changed, rebuild islands
+                islandCache[terrain] = FindTerrainIslands(terrain, cameraDistance);
+                lastCachedTerrain = terrain;
+                lastIslandCameraDistance = cameraDistance;
+            }
+            else
+            {
+                var islands = islandCache[terrain];
+                
+                // Only recalculate positions when camera has stopped moving
+                if (!cameraIsMoving)
+                {
+                    // Check if we need to update based on significant distance change
+                    float distanceChange = Mathf.Abs(cameraDistance - lastIslandCameraDistance);
+                    if (distanceChange > 5f) // Only update if zoom changed significantly
+                    {
+                        foreach (var island in islands)
+                        {
+                            island.CalculateLabelPositions(cameraDistance);
+                        }
+                        lastIslandCameraDistance = cameraDistance;
+                    }
+                }
+            }
+            
+            return islandCache[terrain];
+        }
+        
+        private static List<TerrainIsland> FindTerrainIslands(MapTerrain terrain, float cameraDistance)
+        {
+            if (terrain == null || terrain.m_Terrains == null)
+                return new List<TerrainIsland>();
+            
+            int width = terrain.m_Width;
+            int height = terrain.m_Height;
+            bool[,] visited = new bool[width, height];
+            List<TerrainIsland> islands = new List<TerrainIsland>();
+            
+            // 4-way connectivity directions (up, right, down, left)
+            int[] dx = { 0, 1, 0, -1 };
+            int[] dy = { 1, 0, -1, 0 };
+            
+            for (int y = 0; y < height; y++)
+            {
+                for (int x = 0; x < width; x++)
+                {
+                    if (!visited[x, y])
+                    {
+                        int index = y * width + x;
+                        if (index >= terrain.m_Terrains.Length)
+                            continue;
+                        
+                        string terrainId = terrain.m_Terrains[index];
+                        if (string.IsNullOrEmpty(terrainId))
+                        {
+                            visited[x, y] = true;
+                            continue;
+                        }
+                        
+                        // Start flood fill for this island
+                        TerrainIsland island = new TerrainIsland(terrainId);
+                        Queue<Vector2Int> queue = new Queue<Vector2Int>();
+                        queue.Enqueue(new Vector2Int(x, y));
+                        visited[x, y] = true;
+                        
+                        while (queue.Count > 0)
+                        {
+                            Vector2Int current = queue.Dequeue();
+                            island.tiles.Add(current);
+                            
+                            // Check 4 neighbors
+                            for (int i = 0; i < 4; i++)
+                            {
+                                int nx = current.x + dx[i];
+                                int ny = current.y + dy[i];
+                                
+                                // Check bounds
+                                if (nx >= 0 && nx < width && ny >= 0 && ny < height && !visited[nx, ny])
+                                {
+                                    int neighborIndex = ny * width + nx;
+                                    if (neighborIndex < terrain.m_Terrains.Length)
+                                    {
+                                        string neighborTerrain = terrain.m_Terrains[neighborIndex];
+                                        
+                                        // If same terrain type, add to queue
+                                        if (neighborTerrain == terrainId)
+                                        {
+                                            visited[nx, ny] = true;
+                                            queue.Enqueue(new Vector2Int(nx, ny));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        
+                        island.CalculateLabelPositions(cameraDistance);
+                        islands.Add(island);
+                    }
+                }
+            }
+            
+            return islands;
         }
         
         private static string GetTerrainDisplayText(string terrainId)
