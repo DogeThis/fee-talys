@@ -970,50 +970,55 @@ namespace Editor
                 else
                 {
                     // Original per-tile labeling
-                    for (int row = 0; row < height; row++)
+                    // When painting with "Show on Hover Only" enabled, suppress the regular per-tile label
+                    // to avoid overlapping with the paint tooltip (Current/Paint).
+                    if (!(paintMode && showOnHoverOnly))
                     {
-                        for (int col = 0; col < width; col++)
+                        for (int row = 0; row < height; row++)
                         {
-                            // Skip if hover-only mode and not hovering this tile
-                            if (showOnHoverOnly)
+                            for (int col = 0; col < width; col++)
                             {
-                                if (!isMouseOverGrid || hoveredTile.x != col || hoveredTile.y != row)
+                                // Skip if hover-only mode and not hovering this tile
+                                if (showOnHoverOnly)
+                                {
+                                    if (!isMouseOverGrid || hoveredTile.x != col || hoveredTile.y != row)
+                                        continue;
+                                }
+                                
+                                int index = row * width + col;
+                                
+                                if (index >= selectedTerrain.m_Terrains.Length)
+                                    break;
+                                
+                                string terrainId = selectedTerrain.m_Terrains[index];
+                                
+                                if (string.IsNullOrEmpty(terrainId))
                                     continue;
+                                
+                                // Determine text color based on background
+                                Color labelColor = textColor;
+                                if (autoContrastText && displayMode == DisplayMode.Both && terrainDatabase != null)
+                                {
+                                    Color tileColor = terrainDatabase.GetTerrainColor(terrainId, Color.gray);
+                                    labelColor = GetContrastColor(tileColor);
+                                }
+                                else if (!autoContrastText)
+                                {
+                                    labelColor = textColor;
+                                }
+                                
+                                style.normal.textColor = labelColor;
+                                
+                                float centerX = startX + col * TILE_SIZE + TILE_SIZE * 0.5f;
+                                float centerZ = startZ + row * TILE_SIZE + TILE_SIZE * 0.5f;
+                                Vector3 position = new Vector3(centerX, y, centerZ);
+                                
+                                // Get display text based on mode
+                                string displayText = GetTerrainDisplayText(terrainId);
+                                
+                                // Draw colored icon with the label
+                                DrawLabelWithColoredIcon(position, displayText, terrainId, style, labelColor, autoContrastText && displayMode == DisplayMode.Both);
                             }
-                            
-                            int index = row * width + col;
-                            
-                            if (index >= selectedTerrain.m_Terrains.Length)
-                                break;
-                            
-                            string terrainId = selectedTerrain.m_Terrains[index];
-                            
-                            if (string.IsNullOrEmpty(terrainId))
-                                continue;
-                            
-                            // Determine text color based on background
-                            Color labelColor = textColor;
-                            if (autoContrastText && displayMode == DisplayMode.Both && terrainDatabase != null)
-                            {
-                                Color tileColor = terrainDatabase.GetTerrainColor(terrainId, Color.gray);
-                                labelColor = GetContrastColor(tileColor);
-                            }
-                            else if (!autoContrastText)
-                            {
-                                labelColor = textColor;
-                            }
-                            
-                            style.normal.textColor = labelColor;
-                            
-                            float centerX = startX + col * TILE_SIZE + TILE_SIZE * 0.5f;
-                            float centerZ = startZ + row * TILE_SIZE + TILE_SIZE * 0.5f;
-                            Vector3 position = new Vector3(centerX, y, centerZ);
-                            
-                            // Get display text based on mode
-                            string displayText = GetTerrainDisplayText(terrainId);
-                            
-                            // Draw colored icon with the label
-                            DrawLabelWithColoredIcon(position, displayText, terrainId, style, labelColor, autoContrastText && displayMode == DisplayMode.Both);
                         }
                     }
                 }
@@ -1028,10 +1033,10 @@ namespace Editor
                     // In paint mode, show Current/Paint as info above brush
                     if (paintMode)
                     {
-                        // Pass camera info for smart positioning
+                        // Always show paint mode tooltip
                         DrawPaintModeHoverLabel(hoverPos, hoveredTerrainId, style, hoveredTile, width, height, startX, startZ, y, cameraDistance);
                     }
-                    else
+                    else if (!showOnHoverOnly)  // Only show regular hover labels when NOT in hover-only mode
                     {
                         // Normal hover label
                         string hoverDisplayText = GetTerrainDisplayText(hoveredTerrainId);
@@ -1186,19 +1191,98 @@ namespace Editor
             bool isSampling = Event.current.control;
             bool isSameTerrain = !string.IsNullOrEmpty(currentTerrainId) && currentTerrainId == selectedBrushTerrain;
             
-            // Calculate smart position based on brush size and zoom
+            // Get camera information
+            Camera sceneCamera = SceneView.currentDrawingSceneView.camera;
+            Vector3 cameraPos = sceneCamera.transform.position;
+            
+            // Calculate brush bounds
             int halfSize = (brushSize - 1) / 2;
+            
+            // Find the top edge of the brush area from camera's perspective
+            // We'll place the tooltip as if there was a tile above the top row
             float brushTopZ = startZ + (hoveredTile.y + halfSize + 1) * TILE_SIZE;
+            float brushBottomZ = startZ + (hoveredTile.y - halfSize) * TILE_SIZE;
+            float brushCenterX = position.x;
             
-            // Adjust height based on camera distance
-            float offsetMultiplier = Mathf.Clamp(cameraDistance / 50f, 0.5f, 3f);
-            float tooltipOffset = TILE_SIZE * (halfSize + 1.5f) * offsetMultiplier;
+            // Create test points at the top and bottom edges of the brush
+            Vector3 topEdgePoint = new Vector3(brushCenterX, y, brushTopZ);
+            Vector3 bottomEdgePoint = new Vector3(brushCenterX, y, brushBottomZ);
             
-            Vector3 tooltipWorldPos = new Vector3(
-                position.x, 
-                position.y, 
-                position.z + tooltipOffset
-            );
+            // Convert to screen space to see which is visually "higher"
+            Vector2 topScreenPos = HandleUtility.WorldToGUIPoint(topEdgePoint);
+            Vector2 bottomScreenPos = HandleUtility.WorldToGUIPoint(bottomEdgePoint);
+            
+            // Choose the edge that appears higher on screen (lower Y value in GUI space)
+            Vector3 tooltipBasePos;
+            if (topScreenPos.y < bottomScreenPos.y)
+            {
+                // Top edge is visually higher - place tooltip above it
+                tooltipBasePos = new Vector3(brushCenterX, y, brushTopZ + TILE_SIZE * 0.5f);
+            }
+            else
+            {
+                // Bottom edge is visually higher (camera is rotated) - place tooltip above it
+                tooltipBasePos = new Vector3(brushCenterX, y, brushBottomZ - TILE_SIZE * 0.5f);
+            }
+            
+            // Calculate clearance based on camera mode and distance
+            bool isOrthographic = sceneCamera.orthographic;
+            float baseClearance = TILE_SIZE; // Base clearance of one tile height
+            float clearanceMultiplier;
+            
+            if (isOrthographic)
+            {
+                // In orthographic mode, scale based on orthographic size
+                float orthoSize = sceneCamera.orthographicSize;
+                clearanceMultiplier = Mathf.Clamp(orthoSize / 20f, 0.5f, 2.5f);
+            }
+            else
+            {
+                // In perspective mode, scale based on camera distance
+                // Close up: less clearance needed (tiles appear larger)
+                // Far away: more clearance needed (tiles appear smaller)
+                clearanceMultiplier = Mathf.Clamp(cameraDistance / 50f, 0.5f, 2.5f);
+                
+                // Also consider the camera's field of view
+                float fovMultiplier = sceneCamera.fieldOfView / 60f; // 60 is typical FOV
+                clearanceMultiplier *= Mathf.Clamp(fovMultiplier, 0.8f, 1.2f);
+            }
+            
+            // Calculate the tooltip height with dynamic clearance
+            float tooltipHeight = y + baseClearance * clearanceMultiplier;
+            
+            // For perspective cameras, use ray-based positioning
+            Vector3 tooltipWorldPos;
+            if (!isOrthographic)
+            {
+                // Cast a ray from the camera through the desired tooltip position
+                Vector3 dirToTooltip = (tooltipBasePos - cameraPos).normalized;
+                
+                // Calculate the final position along the ray at the desired height
+                float t = (tooltipHeight - cameraPos.y) / dirToTooltip.y;
+                
+                if (Mathf.Abs(dirToTooltip.y) > 0.01f && t > 0)
+                {
+                    // Calculate position along ray at the target height
+                    tooltipWorldPos = cameraPos + dirToTooltip * t;
+                    
+                    // Adjust X and Z to stay centered above the brush
+                    tooltipWorldPos.x = tooltipBasePos.x;
+                    tooltipWorldPos.z = tooltipBasePos.z;
+                }
+                else
+                {
+                    // Fallback if ray is nearly horizontal or pointing wrong direction
+                    tooltipWorldPos = tooltipBasePos;
+                    tooltipWorldPos.y = tooltipHeight;
+                }
+            }
+            else
+            {
+                // For orthographic cameras, simply offset vertically
+                tooltipWorldPos = tooltipBasePos;
+                tooltipWorldPos.y = tooltipHeight;
+            }
             
             // Convert world position to GUI position
             Vector2 guiPos = HandleUtility.WorldToGUIPoint(tooltipWorldPos);
