@@ -207,6 +207,9 @@ namespace Editor
         private static float hoverHighlightFadeSpeed = 5f; // Adjustable fade speed
         private static float hoverHighlightMaxOpacity = 0.15f; // Maximum opacity for highlight effect
         
+        // Cached highlight region for smooth fade-out
+        private static HashSet<Vector2Int> lastHighlightRegion = null;
+        
         private const string PREFS_PREFIX = "MapTerrainVisualizer_";
         private const string PREFS_ENABLED = PREFS_PREFIX + "Enabled";
         private const string PREFS_SHOW_GRID = PREFS_PREFIX + "ShowGrid";
@@ -222,6 +225,13 @@ namespace Editor
         private const string PREFS_AUTO_CONTRAST = PREFS_PREFIX + "AutoContrast";
         private const string PREFS_GROUP_CONNECTED = PREFS_PREFIX + "GroupConnected";
         private const string PREFS_HOVER_ONLY = PREFS_PREFIX + "HoverOnly";
+        // LOD & Culling prefs
+        private const string PREFS_LOD_ENABLED = PREFS_PREFIX + "LodEnabled";
+        private const string PREFS_LOD_SMALL_THRESHOLD = PREFS_PREFIX + "LodSmallThreshold";
+        private const string PREFS_LOD_CHIP_THRESHOLD = PREFS_PREFIX + "LodChipThreshold";
+        private const string PREFS_LOD_SMALL_SCALE = PREFS_PREFIX + "LodSmallScale";
+        private const string PREFS_CULL_ENABLED = PREFS_PREFIX + "CullEnabled";
+        private const string PREFS_CULL_MIN_SEP = PREFS_PREFIX + "CullMinSep";
         
         private Vector2 scrollPosition;
         private List<MapTerrain> availableTerrains = new List<MapTerrain>();
@@ -231,6 +241,8 @@ namespace Editor
         private string terrainSearchFilter = "";
         
         private const float TILE_SIZE = 5f;
+        private const float LABEL_ICON_SIZE = 8f;
+        private const float LABEL_ICON_PADDING = 3f;
         
         [MenuItem("Window/Map Terrain Visualizer")]
         public static void ShowWindow()
@@ -266,6 +278,10 @@ namespace Editor
             if (terrainDatabase == null)
             {
                 Debug.LogWarning("TerrainTypeDatabase not found. Run 'Tools/Parse Terrain XML' to create it.");
+            }
+            else
+            {
+                terrainColorCache.Clear();
             }
         }
         
@@ -303,27 +319,45 @@ namespace Editor
             }
         }
         
-        // Resolve label color for regular tile/island labels
+    // Resolve label color for regular tile/island labels
         private static Color ResolveLabelColorForTile(string terrainId)
         {
             if (autoContrastText && displayMode == DisplayMode.Both && terrainDatabase != null)
             {
-                Color tileColor = terrainDatabase.GetTerrainColor(terrainId, Color.gray);
+                if (!terrainColorCache.TryGetValue(terrainId, out Color tileColor))
+                {
+                    tileColor = terrainDatabase.GetTerrainColor(terrainId, Color.gray);
+                    terrainColorCache[terrainId] = tileColor;
+                }
                 return GetContrastColor(tileColor);
             }
             return textColor;
         }
 
-        // Resolve label color for hover labels (ignores DisplayMode constraint)
+    // Resolve label color for hover labels (ignores DisplayMode constraint)
         private static Color ResolveHoverLabelColor(string terrainId)
         {
             if (autoContrastText && terrainDatabase != null)
             {
-                Color tileColor = terrainDatabase.GetTerrainColor(terrainId, Color.gray);
+                if (!terrainColorCache.TryGetValue(terrainId, out Color tileColor))
+                {
+                    tileColor = terrainDatabase.GetTerrainColor(terrainId, Color.gray);
+                    terrainColorCache[terrainId] = tileColor;
+                }
                 return GetContrastColor(tileColor);
             }
             return textColor;
         }
+
+        // Modifier detection for sampling (support Ctrl and Cmd)
+        private static bool IsSamplingModifier(Event e)
+        {
+            return e != null && (e.control || e.command);
+        }
+
+        // Per-session caches
+        private static readonly Dictionary<string, Color> terrainColorCache = new Dictionary<string, Color>();
+        private static GUIContent s_LabelContent = new GUIContent();
         
         private void OnDisable()
         {
@@ -349,6 +383,14 @@ namespace Editor
             autoContrastText = EditorPrefs.GetBool(PREFS_AUTO_CONTRAST, true);
             groupConnectedLabels = EditorPrefs.GetBool(PREFS_GROUP_CONNECTED, true);
             showOnHoverOnly = EditorPrefs.GetBool(PREFS_HOVER_ONLY, false);
+            
+            // LOD & Culling
+            lodEnabled = EditorPrefs.GetBool(PREFS_LOD_ENABLED, true);
+            lodSmallTextThreshold = EditorPrefs.GetFloat(PREFS_LOD_SMALL_THRESHOLD, 16f);
+            lodChipOnlyThreshold = EditorPrefs.GetFloat(PREFS_LOD_CHIP_THRESHOLD, 8f);
+            lodSmallTextScale = EditorPrefs.GetFloat(PREFS_LOD_SMALL_SCALE, 0.85f);
+            cullingEnabled = EditorPrefs.GetBool(PREFS_CULL_ENABLED, true);
+            cullingMinSeparation = EditorPrefs.GetFloat(PREFS_CULL_MIN_SEP, 16f);
             
             string colorStr = EditorPrefs.GetString(PREFS_TEXT_COLOR, ColorUtility.ToHtmlStringRGBA(Color.white));
             ColorUtility.TryParseHtmlString("#" + colorStr, out textColor);
@@ -380,6 +422,13 @@ namespace Editor
             EditorPrefs.SetBool(PREFS_AUTO_CONTRAST, autoContrastText);
             EditorPrefs.SetBool(PREFS_GROUP_CONNECTED, groupConnectedLabels);
             EditorPrefs.SetBool(PREFS_HOVER_ONLY, showOnHoverOnly);
+            // LOD & Culling
+            EditorPrefs.SetBool(PREFS_LOD_ENABLED, lodEnabled);
+            EditorPrefs.SetFloat(PREFS_LOD_SMALL_THRESHOLD, lodSmallTextThreshold);
+            EditorPrefs.SetFloat(PREFS_LOD_CHIP_THRESHOLD, lodChipOnlyThreshold);
+            EditorPrefs.SetFloat(PREFS_LOD_SMALL_SCALE, lodSmallTextScale);
+            EditorPrefs.SetBool(PREFS_CULL_ENABLED, cullingEnabled);
+            EditorPrefs.SetFloat(PREFS_CULL_MIN_SEP, cullingMinSeparation);
             EditorPrefs.SetString(PREFS_TEXT_COLOR, ColorUtility.ToHtmlStringRGBA(textColor));
             EditorPrefs.SetString(PREFS_GRID_COLOR, ColorUtility.ToHtmlStringRGBA(gridColor));
             EditorPrefs.SetFloat(PREFS_WORLD_OFFSET + "_X", worldOffset.x);
@@ -535,6 +584,23 @@ namespace Editor
                 {
                     textColor = EditorGUILayout.ColorField("Text Color", textColor);
                 }
+                
+                EditorGUILayout.Space(5);
+                EditorGUILayout.LabelField("Label LOD & Culling", EditorStyles.miniBoldLabel);
+                lodEnabled = EditorGUILayout.Toggle("Enable LOD", lodEnabled);
+                EditorGUI.indentLevel++;
+                if (lodEnabled)
+                {
+                    lodSmallTextThreshold = EditorGUILayout.FloatField("Small Text Threshold (px/tile)", lodSmallTextThreshold);
+                    lodChipOnlyThreshold = EditorGUILayout.FloatField("Chip-only Threshold (px/tile)", lodChipOnlyThreshold);
+                    lodSmallTextScale = EditorGUILayout.Slider("Small Text Scale", lodSmallTextScale, 0.5f, 1.0f);
+                }
+                EditorGUI.indentLevel--;
+                cullingEnabled = EditorGUILayout.Toggle("Enable Screen Culling", cullingEnabled);
+                if (cullingEnabled)
+                {
+                    cullingMinSeparation = EditorGUILayout.Slider("Min Separation (px)", cullingMinSeparation, 4f, 64f);
+                }
             }
             
             gridColor = EditorGUILayout.ColorField("Grid Color", gridColor);
@@ -543,7 +609,6 @@ namespace Editor
             EditorGUILayout.Space(5);
             EditorGUILayout.LabelField("Hover Settings", EditorStyles.miniBoldLabel);
             hoverHighlightMaxOpacity = EditorGUILayout.Slider("Highlight Opacity", hoverHighlightMaxOpacity, 0.05f, 0.5f);
-            hoverHighlightFadeSpeed = EditorGUILayout.Slider("Fade Speed", hoverHighlightFadeSpeed, 1f, 10f);
             
             if (EditorGUI.EndChangeCheck())
             {
@@ -560,8 +625,26 @@ namespace Editor
                 gridColor = new Color(1f, 1f, 1f, 0.3f);
                 gridThickness = 1f;
                 worldOffset = Vector3.zero;
+                lodEnabled = true;
+                lodSmallTextThreshold = 16f;
+                lodChipOnlyThreshold = 8f;
+                lodSmallTextScale = 0.85f;
+                cullingEnabled = true;
+                cullingMinSeparation = 16f;
                 SaveSettings();
                 SceneView.RepaintAll();
+            }
+            
+            // Show current zoom metric for tuning
+            if (selectedTerrain != null && SceneView.lastActiveSceneView != null)
+            {
+                float pxTile = GetPixelsPerTile(SceneView.lastActiveSceneView,
+                    selectedTerrain.m_X + worldOffset.x,
+                    selectedTerrain.m_Z + worldOffset.z,
+                    worldOffset.y,
+                    selectedTerrain.m_Width,
+                    selectedTerrain.m_Height);
+                EditorGUILayout.LabelField($"Zoom: {pxTile:F1} px/tile", EditorStyles.miniLabel);
             }
             
             // Brush Painting Section
@@ -699,7 +782,7 @@ namespace Editor
                         EditorGUILayout.EndScrollView();
                     }
                     
-                    EditorGUILayout.HelpBox("Left Click: Paint | Ctrl+Click: Sample/Pick", MessageType.Info);
+                    EditorGUILayout.HelpBox("Left Click: Paint | Ctrl/Cmd+Click: Sample/Pick", MessageType.Info);
                 }
                 
                 if (EditorGUI.EndChangeCheck())
@@ -719,6 +802,19 @@ namespace Editor
             Vector3 terrainCenter = new Vector3(terrainCenterX, terrainY, terrainCenterZ);
             Vector3 cameraPos = sceneView.camera.transform.position;
             return Vector3.Distance(cameraPos, terrainCenter);
+        }
+
+        // Pixels per tile at the terrain center, for LOD decisions
+        private static float GetPixelsPerTile(SceneView sceneView, float startX, float startZ, float y, int width, int height)
+        {
+            if (sceneView == null) return 100f;
+            float centerX = startX + (width * TILE_SIZE) * 0.5f;
+            float centerZ = startZ + (height * TILE_SIZE) * 0.5f;
+            Vector3 a = new Vector3(centerX, y, centerZ);
+            Vector3 b = new Vector3(centerX + TILE_SIZE, y, centerZ);
+            Vector2 ga = HandleUtility.WorldToGUIPoint(a);
+            Vector2 gb = HandleUtility.WorldToGUIPoint(b);
+            return Mathf.Abs(gb.x - ga.x);
         }
         
         private static void OnSceneGUI(SceneView sceneView)
@@ -777,8 +873,10 @@ namespace Editor
             // Handle mouse input for hover detection and painting
             HandleMouseInput(width, height, startX, startZ, y);
             
+            bool isRepaint = Event.current.type == EventType.Repaint;
+
             // Draw colored tiles if in color mode
-            if (displayMode != DisplayMode.TextOnly && terrainDatabase != null)
+            if (isRepaint && displayMode != DisplayMode.TextOnly && terrainDatabase != null)
             {
                 for (int row = 0; row < height; row++)
                 {
@@ -786,8 +884,8 @@ namespace Editor
                     {
                         int index = row * width + col;
                         
-                        if (index >= selectedTerrain.m_Terrains.Length)
-                            break;
+                            if (index >= selectedTerrain.m_Terrains.Length)
+                                continue;
                         
                         string terrainId = selectedTerrain.m_Terrains[index];
                         
@@ -819,7 +917,7 @@ namespace Editor
             }
             
             // Draw grid lines with solid rendering
-            if (showGridLines)
+            if (isRepaint && showGridLines)
             {
                 Handles.color = gridColor;
                 
@@ -844,7 +942,7 @@ namespace Editor
             }
             
             // Draw island borders when grouping is enabled (always draw borders, regardless of hover mode)
-            if (groupConnectedLabels && terrainDatabase != null)
+            if (isRepaint && groupConnectedLabels && terrainDatabase != null)
             {
                 // Get cached islands or create new ones
                 List<TerrainIsland> islands = GetOrCreateIslands(selectedTerrain, cameraDistance);
@@ -868,66 +966,55 @@ namespace Editor
                 }
             }
             
-            // Update hover highlight animation
+            // Compute current highlight region (normal and paint modes) and draw immediately (no fade).
+            HashSet<Vector2Int> currentHighlightRegion = null;
             if (isMouseOverGrid && hoveredTile.x >= 0 && hoveredTile.y >= 0)
             {
                 int hoveredIndex = hoveredTile.y * width + hoveredTile.x;
                 if (hoveredIndex < selectedTerrain.m_Terrains.Length)
                 {
-                    string hoveredTerrainId = selectedTerrain.m_Terrains[hoveredIndex];
-                    
-                    // In paint mode, handle highlighting differently
-                    if (paintMode && !Event.current.control && !string.IsNullOrEmpty(selectedBrushTerrain))
+                    string hoveredTerrainIdForHighlight = selectedTerrain.m_Terrains[hoveredIndex];
+                    bool isSampling = IsSamplingModifier(Event.current);
+                    if (paintMode && !isSampling && !string.IsNullOrEmpty(selectedBrushTerrain))
                     {
-                        // Set opacity for animation
-                        hoverHighlightTargetOpacity = hoverHighlightMaxOpacity;
-                        
-                        // We handle paint mode highlighting in DrawPaintModeHoverLabel
-                        // which will show adjacent islands and exclude brush area
+                        if (hoveredTerrainIdForHighlight == selectedBrushTerrain)
+                        {
+                            // Highlight current island (already selected terrain)
+                            currentHighlightRegion = FindConnectedRegion(selectedTerrain, hoveredTile, width, height);
+                        }
+                        else
+                        {
+                            // Highlight adjacent same-brush islands but exclude brush area
+                            var adjacent = FindAdjacentIsland(hoveredTile, selectedBrushTerrain, width, height);
+                            var tilesToHighlight = new HashSet<Vector2Int>(adjacent);
+                            int brushHalf = (brushSize - 1) / 2;
+                            for (int dx = -brushHalf; dx <= brushHalf; dx++)
+                            {
+                                for (int dz = -brushHalf; dz <= brushHalf; dz++)
+                                {
+                                    int x = hoveredTile.x + dx;
+                                    int z = hoveredTile.y + dz;
+                                    if (x >= 0 && x < width && z >= 0 && z < height)
+                                        tilesToHighlight.Remove(new Vector2Int(x, z));
+                                }
+                            }
+                            currentHighlightRegion = tilesToHighlight;
+                        }
                     }
-                    else if (!paintMode && !string.IsNullOrEmpty(hoveredTerrainId))
+                    else if (!paintMode && !string.IsNullOrEmpty(hoveredTerrainIdForHighlight))
                     {
-                        // Normal mode - highlight the hovered terrain's island
-                        hoverHighlightTargetOpacity = hoverHighlightMaxOpacity;
-                        
-                        // Find all connected tiles of the same terrain type
-                        HashSet<Vector2Int> region = FindConnectedRegion(selectedTerrain, hoveredTile, width, height);
-                        
-                        // Draw highlight for the entire region with animated opacity
-                        DrawRegionHighlight(region, startX, startZ, y, hoveredTerrainId);
-                    }
-                    else
-                    {
-                        // No terrain or in sampling mode, fade out
-                        hoverHighlightTargetOpacity = 0f;
+                        currentHighlightRegion = FindConnectedRegion(selectedTerrain, hoveredTile, width, height);
                     }
                 }
-                else
-                {
-                    // Outside grid bounds, fade out
-                    hoverHighlightTargetOpacity = 0f;
-                }
-            }
-            else
-            {
-                // Not hovering, fade out
-                hoverHighlightTargetOpacity = 0f;
             }
             
-            // Animate the highlight opacity using deltaTime we already calculated
-            if (Mathf.Abs(hoverHighlightOpacity - hoverHighlightTargetOpacity) > 0.001f)
+            if (isRepaint && currentHighlightRegion != null && currentHighlightRegion.Count > 0)
             {
-                hoverHighlightOpacity = Mathf.Lerp(hoverHighlightOpacity, hoverHighlightTargetOpacity, 
-                    deltaTime * hoverHighlightFadeSpeed);
-                sceneView.Repaint(); // Keep repainting during animation
-            }
-            else
-            {
-                hoverHighlightOpacity = hoverHighlightTargetOpacity; // Snap to target when close
+                DrawRegionHighlight(currentHighlightRegion, startX, startZ, y, "");
             }
             
             // Draw text labels if not in color-only mode
-            if (displayMode != DisplayMode.ColorOnly)
+            if (isRepaint && displayMode != DisplayMode.ColorOnly)
             {
                 GUIStyle style = new GUIStyle();
                 style.fontSize = Mathf.RoundToInt(12 * textSize);
@@ -950,6 +1037,14 @@ namespace Editor
                     }
                 }
                 
+                // Determine LOD detail based on zoom
+                float pixelsPerTile = GetPixelsPerTile(sceneView, startX, startZ, y, width, height);
+                LabelDetail detail = GetDetailForZoom(pixelsPerTile);
+                
+                // Per-frame caches
+                var frameTextCache = new Dictionary<string, string>(64);
+                var cullGrid = new Dictionary<(int,int), List<Rect>>();
+
                 // Use island grouping when enabled and not in hover-only mode
                 if (groupConnectedLabels && !showOnHoverOnly)
                 {
@@ -958,6 +1053,7 @@ namespace Editor
                     
                     // Batch GUI for island labels
                     Handles.BeginGUI();
+                    List<Rect> occupied = new List<Rect>();
                     
                     // Draw labels at their natural positions
                     foreach (var island in islands)
@@ -976,14 +1072,37 @@ namespace Editor
                             float centerZ = startZ + labelPos.y * TILE_SIZE + TILE_SIZE * 0.5f;
                             Vector3 worldPos = new Vector3(centerX, y, centerZ);
                             
-                            string displayText = GetTerrainDisplayText(island.terrainId);
+                            string key = island.terrainId + "|" + textDisplayMode;
+                            if (!frameTextCache.TryGetValue(key, out string displayText))
+                            {
+                                displayText = GetTerrainDisplayText(island.terrainId);
+                                frameTextCache[key] = displayText;
+                            }
                             
                             Color labelColor = ResolveLabelColorForTile(island.terrainId);
                             
                             style.normal.textColor = labelColor;
                             
-                            // Draw colored icon with the label
-                            DrawLabelWithColoredIcon(worldPos, displayText, island.terrainId, style, labelColor, autoContrastText && displayMode == DisplayMode.Both);
+                            bool isHoveredIsland = showHoverLabel && island.tiles.Contains(hoveredTile);
+                            if (detail == LabelDetail.ChipOnly && !isHoveredIsland)
+                            {
+                                Rect chipRect = CalcChipRect(worldPos);
+                                if (!cullingEnabled || !OverlapsGrid(cullGrid, chipRect, cullingMinSeparation))
+                                {
+                                    DrawColorChip(worldPos, island.terrainId);
+                                }
+                                continue;
+                            }
+                            else
+                            {
+                                int baseFont = Mathf.RoundToInt(12 * textSize);
+                                style.fontSize = (detail == LabelDetail.SmallText) ? Mathf.Max(8, Mathf.RoundToInt(baseFont * lodSmallTextScale)) : baseFont;
+                                Rect rect = CalcLabelRect(worldPos, displayText, style);
+                                if (!cullingEnabled || !OverlapsGrid(cullGrid, rect, cullingMinSeparation))
+                                {
+                                    DrawLabelWithColoredIcon(worldPos, displayText, island.terrainId, style, labelColor, autoContrastText && displayMode == DisplayMode.Both);
+                                }
+                            }
                         }
                     }
                     
@@ -998,6 +1117,7 @@ namespace Editor
                     {
                         // Batch GUI for per-tile labels
                         Handles.BeginGUI();
+                        var cullGridTiles = new Dictionary<(int,int), List<Rect>>();
                         for (int row = 0; row < height; row++)
                         {
                             for (int col = 0; col < width; col++)
@@ -1012,7 +1132,7 @@ namespace Editor
                                 int index = row * width + col;
                                 
                                 if (index >= selectedTerrain.m_Terrains.Length)
-                                    break;
+                                    continue;
                                 
                                 string terrainId = selectedTerrain.m_Terrains[index];
                                 
@@ -1028,10 +1148,33 @@ namespace Editor
                                 Vector3 position = new Vector3(centerX, y, centerZ);
                                 
                                 // Get display text based on mode
-                                string displayText = GetTerrainDisplayText(terrainId);
+                                string key = terrainId + "|" + textDisplayMode;
+                                if (!frameTextCache.TryGetValue(key, out string displayText))
+                                {
+                                    displayText = GetTerrainDisplayText(terrainId);
+                                    frameTextCache[key] = displayText;
+                                }
                                 
-                                // Draw colored icon with the label
-                                DrawLabelWithColoredIcon(position, displayText, terrainId, style, labelColor, autoContrastText && displayMode == DisplayMode.Both);
+                                // LOD and culling
+                                bool isHoveredTile = showHoverLabel && hoveredTile.x == col && hoveredTile.y == row;
+                                if (detail == LabelDetail.ChipOnly && !isHoveredTile)
+                                {
+                                    Rect chipRect = CalcChipRect(position);
+                                    if (!cullingEnabled || !OverlapsGrid(cullGridTiles, chipRect, cullingMinSeparation))
+                                    {
+                                        DrawColorChip(position, terrainId);
+                                    }
+                                }
+                                else
+                                {
+                                    int baseFont = Mathf.RoundToInt(12 * textSize);
+                                    style.fontSize = (detail == LabelDetail.SmallText) ? Mathf.Max(8, Mathf.RoundToInt(baseFont * lodSmallTextScale)) : baseFont;
+                                    Rect rect = CalcLabelRect(position, displayText, style);
+                                    if (!cullingEnabled || !OverlapsGrid(cullGridTiles, rect, cullingMinSeparation))
+                                    {
+                                        DrawLabelWithColoredIcon(position, displayText, terrainId, style, labelColor, autoContrastText && displayMode == DisplayMode.Both);
+                                    }
+                                }
                             }
                         }
                         Handles.EndGUI();
@@ -1085,9 +1228,38 @@ namespace Editor
             }
         }
         
+        private static bool isPaintingStroke = false;
+        private static int paintUndoGroup = -1;
+        private static HashSet<int> paintedIndicesThisDrag = new HashSet<int>();
+
+        private static void BeginPaintStroke()
+        {
+            if (isPaintingStroke || selectedTerrain == null) return;
+            Undo.IncrementCurrentGroup();
+            Undo.SetCurrentGroupName("Paint Terrain");
+            paintUndoGroup = Undo.GetCurrentGroup();
+            Undo.RecordObject(selectedTerrain, "Paint Terrain");
+            paintedIndicesThisDrag.Clear();
+            isPaintingStroke = true;
+        }
+
+        private static void EndPaintStroke()
+        {
+            if (!isPaintingStroke) return;
+            if (paintUndoGroup >= 0)
+            {
+                Undo.CollapseUndoOperations(paintUndoGroup);
+                paintUndoGroup = -1;
+            }
+            isPaintingStroke = false;
+            paintedIndicesThisDrag.Clear();
+        }
+
         private static void HandleMouseInput(int width, int height, float startX, float startZ, float y)
         {
             Event currentEvent = Event.current;
+            Vector2Int prevHovered = hoveredTile;
+            bool prevOver = isMouseOverGrid;
             
             // Get mouse position in world space
             Ray ray = HandleUtility.GUIPointToWorldRay(currentEvent.mousePosition);
@@ -1116,18 +1288,30 @@ namespace Editor
                 if (paintMode)
                 {
                     // Handle mouse clicks
-                    if (currentEvent.type == EventType.MouseDown || currentEvent.type == EventType.MouseDrag)
+                    if (currentEvent.type == EventType.MouseDown || currentEvent.type == EventType.MouseDrag || currentEvent.type == EventType.MouseUp)
                     {
                         if (currentEvent.button == 0) // Left click
                         {
                             // Check for modifier keys
-                            if (currentEvent.control && currentEvent.type == EventType.MouseDown) // Ctrl + Left click - pick/sample
+                            if (IsSamplingModifier(currentEvent) && currentEvent.type == EventType.MouseDown) // Ctrl/Cmd + Left click - pick/sample
                             {
                                 PickTerrain(hoveredTile, width);
                             }
                             else // Normal left click - paint
                             {
-                                PaintTerrain(hoveredTile, width, height);
+                                if (currentEvent.type == EventType.MouseDown)
+                                {
+                                    BeginPaintStroke();
+                                    PaintTerrainDedup(hoveredTile, width, height);
+                                }
+                                else if (currentEvent.type == EventType.MouseDrag && isPaintingStroke)
+                                {
+                                    PaintTerrainDedup(hoveredTile, width, height);
+                                }
+                                else if (currentEvent.type == EventType.MouseUp && isPaintingStroke)
+                                {
+                                    EndPaintStroke();
+                                }
                             }
                             currentEvent.Use();
                         }
@@ -1143,57 +1327,57 @@ namespace Editor
             else
             {
                 isMouseOverGrid = false;
+                if (isPaintingStroke)
+                {
+                    EndPaintStroke();
+                }
+            }
+
+            // Trigger a repaint when hover state changes to keep non-paint mode responsive
+            if (isMouseOverGrid != prevOver || hoveredTile != prevHovered)
+            {
+                SceneView.RepaintAll();
+            }
+        }
+
+        private static void PaintTerrainDedup(Vector2Int centerTile, int width, int height)
+        {
+            if (string.IsNullOrEmpty(selectedBrushTerrain) || selectedTerrain == null) return;
+            int halfSize = (brushSize - 1) / 2;
+            bool modified = false;
+            for (int dx = -halfSize; dx <= halfSize; dx++)
+            {
+                for (int dz = -halfSize; dz <= halfSize; dz++)
+                {
+                    int tileX = centerTile.x + dx;
+                    int tileZ = centerTile.y + dz;
+                    if (tileX >= 0 && tileX < width && tileZ >= 0 && tileZ < height)
+                    {
+                        int index = tileZ * width + tileX;
+                        if (!paintedIndicesThisDrag.Contains(index) && index < selectedTerrain.m_Terrains.Length)
+                        {
+                            selectedTerrain.m_Terrains[index] = selectedBrushTerrain;
+                            paintedIndicesThisDrag.Add(index);
+                            modified = true;
+                        }
+                    }
+                }
+            }
+            if (modified)
+            {
+                EditorUtility.SetDirty(selectedTerrain);
+                if (islandCache.ContainsKey(selectedTerrain)) islandCache.Remove(selectedTerrain);
+                SceneView.RepaintAll();
             }
         }
         
         private static void DrawPaintModeHoverLabel(Vector3 position, string currentTerrainId, GUIStyle baseStyle, Vector2Int hoveredTile, int width, int height, float startX, float startZ, float y, float cameraDistance)
         {
-            // Handle highlighting in paint mode
-            if (!Event.current.control && !string.IsNullOrEmpty(selectedBrushTerrain) && selectedTerrain != null)
-            {
-                // If we're painting the same terrain ("Already X" case), just show normal highlight
-                if (currentTerrainId == selectedBrushTerrain)
-                {
-                    // Show the full island highlight like in normal hover mode
-                    HashSet<Vector2Int> currentIsland = FindConnectedRegion(selectedTerrain, hoveredTile, width, height);
-                    if (currentIsland.Count > 0)
-                    {
-                        DrawRegionHighlight(currentIsland, startX, startZ, y, currentTerrainId);
-                    }
-                }
-                else
-                {
-                    // Different terrain - show adjacent islands that would be extended
-                    HashSet<Vector2Int> adjacentIsland = FindAdjacentIsland(hoveredTile, selectedBrushTerrain, width, height);
-                    
-                    // Exclude brush area tiles from highlight
-                    HashSet<Vector2Int> tilesToHighlight = new HashSet<Vector2Int>(adjacentIsland);
-                    
-                    int brushHalfSize = (brushSize - 1) / 2;
-                    for (int dx = -brushHalfSize; dx <= brushHalfSize; dx++)
-                    {
-                        for (int dz = -brushHalfSize; dz <= brushHalfSize; dz++)
-                        {
-                            int x = hoveredTile.x + dx;
-                            int z = hoveredTile.y + dz;
-                            if (x >= 0 && x < width && z >= 0 && z < height)
-                            {
-                                tilesToHighlight.Remove(new Vector2Int(x, z));
-                            }
-                        }
-                    }
-                    
-                    // Draw the highlight for adjacent islands (excluding brush area)
-                    if (tilesToHighlight.Count > 0)
-                    {
-                        DrawRegionHighlight(tilesToHighlight, startX, startZ, y, selectedBrushTerrain);
-                    }
-                }
-            }
+            // Highlighting is handled in OnSceneGUI for unified fade behavior
             
             Handles.BeginGUI();
             
-            bool isSampling = Event.current.control;
+            bool isSampling = IsSamplingModifier(Event.current);
             bool isSameTerrain = !string.IsNullOrEmpty(currentTerrainId) && currentTerrainId == selectedBrushTerrain;
             
             // Get camera information
@@ -1484,7 +1668,7 @@ namespace Editor
         private static void DrawBrushPreview(Vector2Int centerTile, int width, int height, float startX, float startZ, float y)
         {
             Event currentEvent = Event.current;
-            bool isSampling = currentEvent.control;
+            bool isSampling = IsSamplingModifier(currentEvent);
             
             if (isSampling)
             {
@@ -1741,10 +1925,9 @@ namespace Editor
         private static void DrawRegionHighlight(HashSet<Vector2Int> region, float startX, float startZ, float y, string terrainId)
         {
             if (region.Count == 0) return;
-            if (hoverHighlightOpacity <= 0.001f) return; // Skip drawing if fully transparent
             
             // Create a subtle white overlay with animated opacity
-            Color highlightColor = new Color(1f, 1f, 1f, hoverHighlightOpacity);
+            Color highlightColor = new Color(1f, 1f, 1f, hoverHighlightMaxOpacity);
             
             // Draw highlight overlay for each tile in the region
             foreach (var tile in region)
@@ -1800,7 +1983,7 @@ namespace Editor
             }
             
             // Draw the border edges with animated opacity
-            float borderOpacity = Mathf.Min(0.3f, hoverHighlightOpacity * 4f); // Border fades in slightly faster
+            float borderOpacity = 0.3f;
             Handles.color = new Color(1f, 1f, 1f, borderOpacity);
             foreach (var edge in edges)
             {
@@ -1825,8 +2008,8 @@ namespace Editor
             Vector2 guiPos = HandleUtility.WorldToGUIPoint(position);
             
             // Calculate text dimensions
-            GUIContent content = new GUIContent(text);
-            Vector2 textSize = textStyle.CalcSize(content);
+            s_LabelContent.text = text;
+            Vector2 textSize = textStyle.CalcSize(s_LabelContent);
             
             // Add padding for the colored icon
             float iconSize = 8f;
@@ -1858,7 +2041,7 @@ namespace Editor
                     textSize.x, 
                     labelRect.height
                 );
-                GUI.Label(outlineTextRect, text, outlineStyle);
+                GUI.Label(outlineTextRect, s_LabelContent, outlineStyle);
                 
                 // Draw outline for icon too
                 if (terrainDatabase != null)
@@ -1898,7 +2081,7 @@ namespace Editor
             textStyle.normal.textColor = textColor;
             Rect textRect = new Rect(labelRect.x + iconSize + iconPadding * 2, labelRect.y, 
                 textSize.x, labelRect.height);
-            GUI.Label(textRect, text, textStyle);
+            GUI.Label(textRect, s_LabelContent, textStyle);
         }
         
         private static void DrawIslandBorders(TerrainIsland island, int mapWidth, int mapHeight, float startX, float startZ, float y, Color borderColor)
@@ -2132,5 +2315,107 @@ namespace Editor
             
             EditorGUILayout.EndHorizontal();
         }
+
+        private enum LabelDetail { Full, SmallText, ChipOnly }
+
+        private static bool lodEnabled = true;
+        private static float lodSmallTextThreshold = 50f;
+        private static float lodChipOnlyThreshold = 80f;
+        private static float lodSmallTextScale = 0.85f;
+        private static bool cullingEnabled = true;
+        private static float cullingMinSeparation = 16f;
+
+    private static LabelDetail GetDetailForZoom(float pixelsPerTile)
+    {
+        if (!lodEnabled) return LabelDetail.Full;
+        // When zoomed out, pixelsPerTile is small
+        if (pixelsPerTile <= lodChipOnlyThreshold) return LabelDetail.ChipOnly;
+        if (pixelsPerTile <= lodSmallTextThreshold) return LabelDetail.SmallText;
+        return LabelDetail.Full;
     }
+
+        private static Rect InflateRect(Rect r, float padding)
+        {
+            return new Rect(r.x - padding, r.y - padding, r.width + padding * 2f, r.height + padding * 2f);
+        }
+
+    // Spatial hash culling grid to cut overlap checks
+    private static bool OverlapsGrid(Dictionary<(int,int), List<Rect>> grid, Rect candidate, float minSeparation)
+    {
+        float cell = Mathf.Max(8f, minSeparation);
+        Rect inflated = InflateRect(candidate, minSeparation * 0.5f);
+        int x0 = Mathf.FloorToInt(inflated.xMin / cell);
+        int y0 = Mathf.FloorToInt(inflated.yMin / cell);
+        int x1 = Mathf.FloorToInt(inflated.xMax / cell);
+        int y1 = Mathf.FloorToInt(inflated.yMax / cell);
+        for (int y = y0; y <= y1; y++)
+        {
+            for (int x = x0; x <= x1; x++)
+            {
+                var key = (x, y);
+                if (grid.TryGetValue(key, out var list))
+                {
+                    foreach (var r in list)
+                    {
+                        if (r.Overlaps(inflated)) return true;
+                    }
+                }
+            }
+        }
+        // No overlaps, insert into grid cells
+        for (int y = y0; y <= y1; y++)
+        {
+            for (int x = x0; x <= x1; x++)
+            {
+                var key = (x, y);
+                if (!grid.TryGetValue(key, out var list))
+                {
+                    list = new List<Rect>(4);
+                    grid[key] = list;
+                }
+                list.Add(inflated);
+            }
+        }
+        return false;
+    }
+
+        private static Rect CalcLabelRect(Vector3 worldPos, string text, GUIStyle style)
+        {
+            Vector2 guiPos = HandleUtility.WorldToGUIPoint(worldPos);
+            s_LabelContent.text = text;
+            Vector2 size = style.CalcSize(s_LabelContent);
+            float totalWidth = size.x + LABEL_ICON_SIZE + LABEL_ICON_PADDING * 2f;
+            return new Rect(guiPos.x - totalWidth / 2f, guiPos.y - size.y / 2f, totalWidth, size.y);
+        }
+
+        private static Rect CalcChipRect(Vector3 worldPos)
+        {
+            Vector2 guiPos = HandleUtility.WorldToGUIPoint(worldPos);
+            float totalWidth = LABEL_ICON_SIZE + LABEL_ICON_PADDING * 2f;
+            float height = LABEL_ICON_SIZE;
+            return new Rect(guiPos.x - totalWidth / 2f, guiPos.y - height / 2f, totalWidth, height);
+        }
+
+        private static void DrawColorChip(Vector3 worldPos, string terrainId)
+        {
+            Color terrainColor = terrainDatabase != null ? terrainDatabase.GetTerrainColor(terrainId, Color.gray) : Color.gray;
+            Vector2 guiPos = HandleUtility.WorldToGUIPoint(worldPos);
+            Rect chipRect = new Rect(guiPos.x - (LABEL_ICON_SIZE + LABEL_ICON_PADDING * 2f) / 2f + LABEL_ICON_PADDING,
+                                     guiPos.y - LABEL_ICON_SIZE / 2f,
+                                     LABEL_ICON_SIZE,
+                                     LABEL_ICON_SIZE);
+            // Draw chip background
+            EditorGUI.DrawRect(chipRect, terrainColor);
+            // Draw outline
+            Vector3[] verts = new Vector3[]
+            {
+                new Vector3(chipRect.x, chipRect.y, 0),
+                new Vector3(chipRect.x + chipRect.width, chipRect.y, 0),
+                new Vector3(chipRect.x + chipRect.width, chipRect.y + chipRect.height, 0),
+                new Vector3(chipRect.x, chipRect.y + chipRect.height, 0)
+            };
+            Handles.DrawSolidRectangleWithOutline(verts, Color.clear, Color.black);
+        }
+    }
+
 }
