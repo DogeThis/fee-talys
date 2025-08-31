@@ -20,14 +20,7 @@ namespace Editor
         ShowBoth
     }
     
-    // Class to store label information for overlap resolution
-    public class LabelInfo
-    {
-        public Vector3 originalPosition;
-        public Vector3 adjustedPosition;
-        public string terrainId;
-        public string displayText;
-    }
+    // Removed unused LabelInfo class
     
     // Class to represent a connected group of terrain tiles
     public class TerrainIsland
@@ -192,6 +185,15 @@ namespace Editor
         private static bool cameraIsMoving = false;
         private const float CAMERA_STILL_THRESHOLD = 0.3f; // Wait this long after camera stops
         
+        // Common 4-way neighbor directions
+        private static readonly Vector2Int[] Directions4 = new Vector2Int[]
+        {
+            new Vector2Int(0, 1),   // up
+            new Vector2Int(1, 0),   // right
+            new Vector2Int(0, -1),  // down
+            new Vector2Int(-1, 0)   // left
+        };
+        
         // Brush painting variables
         private static bool paintMode = false;
         private static string selectedBrushTerrain = "";
@@ -219,6 +221,7 @@ namespace Editor
         private const string PREFS_COLOR_BRIGHTNESS = PREFS_PREFIX + "ColorBrightness";
         private const string PREFS_AUTO_CONTRAST = PREFS_PREFIX + "AutoContrast";
         private const string PREFS_GROUP_CONNECTED = PREFS_PREFIX + "GroupConnected";
+        private const string PREFS_HOVER_ONLY = PREFS_PREFIX + "HoverOnly";
         
         private Vector2 scrollPosition;
         private List<MapTerrain> availableTerrains = new List<MapTerrain>();
@@ -300,6 +303,28 @@ namespace Editor
             }
         }
         
+        // Resolve label color for regular tile/island labels
+        private static Color ResolveLabelColorForTile(string terrainId)
+        {
+            if (autoContrastText && displayMode == DisplayMode.Both && terrainDatabase != null)
+            {
+                Color tileColor = terrainDatabase.GetTerrainColor(terrainId, Color.gray);
+                return GetContrastColor(tileColor);
+            }
+            return textColor;
+        }
+
+        // Resolve label color for hover labels (ignores DisplayMode constraint)
+        private static Color ResolveHoverLabelColor(string terrainId)
+        {
+            if (autoContrastText && terrainDatabase != null)
+            {
+                Color tileColor = terrainDatabase.GetTerrainColor(terrainId, Color.gray);
+                return GetContrastColor(tileColor);
+            }
+            return textColor;
+        }
+        
         private void OnDisable()
         {
             SceneView.duringSceneGui -= OnSceneGUI;
@@ -323,6 +348,7 @@ namespace Editor
             colorBrightness = EditorPrefs.GetFloat(PREFS_COLOR_BRIGHTNESS, 1.0f);
             autoContrastText = EditorPrefs.GetBool(PREFS_AUTO_CONTRAST, true);
             groupConnectedLabels = EditorPrefs.GetBool(PREFS_GROUP_CONNECTED, true);
+            showOnHoverOnly = EditorPrefs.GetBool(PREFS_HOVER_ONLY, false);
             
             string colorStr = EditorPrefs.GetString(PREFS_TEXT_COLOR, ColorUtility.ToHtmlStringRGBA(Color.white));
             ColorUtility.TryParseHtmlString("#" + colorStr, out textColor);
@@ -353,6 +379,7 @@ namespace Editor
             EditorPrefs.SetFloat(PREFS_COLOR_BRIGHTNESS, colorBrightness);
             EditorPrefs.SetBool(PREFS_AUTO_CONTRAST, autoContrastText);
             EditorPrefs.SetBool(PREFS_GROUP_CONNECTED, groupConnectedLabels);
+            EditorPrefs.SetBool(PREFS_HOVER_ONLY, showOnHoverOnly);
             EditorPrefs.SetString(PREFS_TEXT_COLOR, ColorUtility.ToHtmlStringRGBA(textColor));
             EditorPrefs.SetString(PREFS_GRID_COLOR, ColorUtility.ToHtmlStringRGBA(gridColor));
             EditorPrefs.SetFloat(PREFS_WORLD_OFFSET + "_X", worldOffset.x);
@@ -929,15 +956,18 @@ namespace Editor
                     // Get cached islands (already retrieved above for borders)
                     List<TerrainIsland> islands = GetOrCreateIslands(selectedTerrain, cameraDistance);
                     
+                    // Batch GUI for island labels
+                    Handles.BeginGUI();
+                    
                     // Draw labels at their natural positions
                     foreach (var island in islands)
                     {
                         if (string.IsNullOrEmpty(island.terrainId))
                             continue;
                         
-                        // Skip this island's label if we're hovering over it (will draw hover label instead)
+                        // Skip this island's label if we're hovering over it (will draw hover/paint tooltip instead)
                         // Check if the hovered tile is part of THIS specific island
-                        if (showHoverLabel && paintMode && island.tiles.Contains(hoveredTile))
+                        if (showHoverLabel && island.tiles.Contains(hoveredTile))
                             continue;
                         
                         foreach (var labelPos in island.labelPositions)
@@ -948,17 +978,7 @@ namespace Editor
                             
                             string displayText = GetTerrainDisplayText(island.terrainId);
                             
-                            // Determine text color based on background
-                            Color labelColor = textColor;
-                            if (autoContrastText && displayMode == DisplayMode.Both && terrainDatabase != null)
-                            {
-                                Color tileColor = terrainDatabase.GetTerrainColor(island.terrainId, Color.gray);
-                                labelColor = GetContrastColor(tileColor);
-                            }
-                            else if (!autoContrastText)
-                            {
-                                labelColor = textColor;
-                            }
+                            Color labelColor = ResolveLabelColorForTile(island.terrainId);
                             
                             style.normal.textColor = labelColor;
                             
@@ -966,6 +986,8 @@ namespace Editor
                             DrawLabelWithColoredIcon(worldPos, displayText, island.terrainId, style, labelColor, autoContrastText && displayMode == DisplayMode.Both);
                         }
                     }
+                    
+                    Handles.EndGUI();
                 }
                 else
                 {
@@ -974,6 +996,8 @@ namespace Editor
                     // to avoid overlapping with the paint tooltip (Current/Paint).
                     if (!(paintMode && showOnHoverOnly))
                     {
+                        // Batch GUI for per-tile labels
+                        Handles.BeginGUI();
                         for (int row = 0; row < height; row++)
                         {
                             for (int col = 0; col < width; col++)
@@ -995,17 +1019,7 @@ namespace Editor
                                 if (string.IsNullOrEmpty(terrainId))
                                     continue;
                                 
-                                // Determine text color based on background
-                                Color labelColor = textColor;
-                                if (autoContrastText && displayMode == DisplayMode.Both && terrainDatabase != null)
-                                {
-                                    Color tileColor = terrainDatabase.GetTerrainColor(terrainId, Color.gray);
-                                    labelColor = GetContrastColor(tileColor);
-                                }
-                                else if (!autoContrastText)
-                                {
-                                    labelColor = textColor;
-                                }
+                                Color labelColor = ResolveLabelColorForTile(terrainId);
                                 
                                 style.normal.textColor = labelColor;
                                 
@@ -1020,6 +1034,7 @@ namespace Editor
                                 DrawLabelWithColoredIcon(position, displayText, terrainId, style, labelColor, autoContrastText && displayMode == DisplayMode.Both);
                             }
                         }
+                        Handles.EndGUI();
                     }
                 }
                 
@@ -1041,25 +1056,17 @@ namespace Editor
                         // Normal hover label
                         string hoverDisplayText = GetTerrainDisplayText(hoveredTerrainId);
                         
-                        // Determine text color for hover label
-                        Color hoverLabelColor = textColor;
-                        if (autoContrastText && terrainDatabase != null)
-                        {
-                            Color tileColor = terrainDatabase.GetTerrainColor(hoveredTerrainId, Color.gray);
-                            hoverLabelColor = GetContrastColor(tileColor);
-                        }
-                        else if (!autoContrastText)
-                        {
-                            hoverLabelColor = textColor;
-                        }
+                        Color hoverLabelColor = ResolveHoverLabelColor(hoveredTerrainId);
                         
                         // Make hover label slightly larger and with a highlight
                         GUIStyle hoverStyle = new GUIStyle(style);
                         hoverStyle.fontSize = Mathf.RoundToInt(14 * textSize); // Slightly larger
                         hoverStyle.normal.textColor = hoverLabelColor;
                         
-                        // Draw the hover label
+                        // Batch begin for single hover label
+                        Handles.BeginGUI();
                         DrawLabelWithColoredIcon(hoverPos, hoverDisplayText, hoveredTerrainId, hoverStyle, hoverLabelColor, autoContrastText);
+                        Handles.EndGUI();
                     }
                 }
             }
@@ -1137,8 +1144,6 @@ namespace Editor
             {
                 isMouseOverGrid = false;
             }
-            
-            SceneView.RepaintAll();
         }
         
         private static void DrawPaintModeHoverLabel(Vector3 position, string currentTerrainId, GUIStyle baseStyle, Vector2Int hoveredTile, int width, int height, float startX, float startZ, float y, float cameraDistance)
@@ -1430,17 +1435,10 @@ namespace Editor
             // Start with tiles adjacent to brush area
             foreach (var brushTile in brushArea)
             {
-                Vector2Int[] neighbors = new Vector2Int[]
+                foreach (var dir in Directions4)
                 {
-                    new Vector2Int(brushTile.x, brushTile.y + 1),
-                    new Vector2Int(brushTile.x + 1, brushTile.y),
-                    new Vector2Int(brushTile.x, brushTile.y - 1),
-                    new Vector2Int(brushTile.x - 1, brushTile.y)
-                };
-                
-                foreach (var neighbor in neighbors)
-                {
-                    if (!brushArea.Contains(neighbor) && 
+                    var neighbor = brushTile + dir;
+                    if (!brushArea.Contains(neighbor) &&
                         neighbor.x >= 0 && neighbor.x < width &&
                         neighbor.y >= 0 && neighbor.y < height &&
                         !visited.Contains(neighbor))
@@ -1462,16 +1460,9 @@ namespace Editor
                 var current = toCheck.Dequeue();
                 island.Add(current);
                 
-                Vector2Int[] neighbors = new Vector2Int[]
+                foreach (var dir in Directions4)
                 {
-                    new Vector2Int(current.x, current.y + 1),
-                    new Vector2Int(current.x + 1, current.y),
-                    new Vector2Int(current.x, current.y - 1),
-                    new Vector2Int(current.x - 1, current.y)
-                };
-                
-                foreach (var neighbor in neighbors)
-                {
+                    var neighbor = current + dir;
                     if (neighbor.x >= 0 && neighbor.x < width &&
                         neighbor.y >= 0 && neighbor.y < height &&
                         !visited.Contains(neighbor))
@@ -1682,25 +1673,6 @@ namespace Editor
             }
         }
         
-        private static void EraseTerrain(Vector2Int centerTile, int width, int height)
-        {
-            // For now, erase sets to first terrain in database or empty
-            string eraseTerrain = "";
-            if (terrainDatabase != null)
-            {
-                var allTypes = terrainDatabase.GetAllTerrainTypes();
-                if (allTypes.Count > 0)
-                {
-                    eraseTerrain = allTypes[0].tid; // Use first terrain as "eraser"
-                }
-            }
-            
-            string temp = selectedBrushTerrain;
-            selectedBrushTerrain = eraseTerrain;
-            PaintTerrain(centerTile, width, height);
-            selectedBrushTerrain = temp;
-        }
-        
         private static void PickTerrain(Vector2Int tile, int width)
         {
             if (selectedTerrain == null)
@@ -1739,21 +1711,12 @@ namespace Editor
             toVisit.Enqueue(startTile);
             visited.Add(startTile);
             
-            // 4-way connectivity
-            Vector2Int[] directions = new Vector2Int[]
-            {
-                new Vector2Int(0, 1),   // up
-                new Vector2Int(0, -1),  // down
-                new Vector2Int(1, 0),   // right
-                new Vector2Int(-1, 0)   // left
-            };
-            
             while (toVisit.Count > 0)
             {
                 Vector2Int current = toVisit.Dequeue();
                 region.Add(current);
                 
-                foreach (var dir in directions)
+                foreach (var dir in Directions4)
                 {
                     Vector2Int neighbor = current + dir;
                     
@@ -1858,8 +1821,6 @@ namespace Editor
         
         private static void DrawLabelWithColoredIcon(Vector3 position, string text, string terrainId, GUIStyle textStyle, Color textColor, bool drawShadow)
         {
-            Handles.BeginGUI();
-            
             // Convert world position to GUI position
             Vector2 guiPos = HandleUtility.WorldToGUIPoint(position);
             
@@ -1938,8 +1899,6 @@ namespace Editor
             Rect textRect = new Rect(labelRect.x + iconSize + iconPadding * 2, labelRect.y, 
                 textSize.x, labelRect.height);
             GUI.Label(textRect, text, textStyle);
-            
-            Handles.EndGUI();
         }
         
         private static void DrawIslandBorders(TerrainIsland island, int mapWidth, int mapHeight, float startX, float startZ, float y, Color borderColor)
@@ -2034,10 +1993,6 @@ namespace Editor
             bool[,] visited = new bool[width, height];
             List<TerrainIsland> islands = new List<TerrainIsland>();
             
-            // 4-way connectivity directions (up, right, down, left)
-            int[] dx = { 0, 1, 0, -1 };
-            int[] dy = { 1, 0, -1, 0 };
-            
             for (int y = 0; y < height; y++)
             {
                 for (int x = 0; x < width; x++)
@@ -2067,10 +2022,10 @@ namespace Editor
                             island.tiles.Add(current);
                             
                             // Check 4 neighbors
-                            for (int i = 0; i < 4; i++)
+                            foreach (var dir in Directions4)
                             {
-                                int nx = current.x + dx[i];
-                                int ny = current.y + dy[i];
+                                int nx = current.x + dir.x;
+                                int ny = current.y + dir.y;
                                 
                                 // Check bounds
                                 if (nx >= 0 && nx < width && ny >= 0 && ny < height && !visited[nx, ny])
