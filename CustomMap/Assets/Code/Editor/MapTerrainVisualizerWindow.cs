@@ -201,16 +201,18 @@ namespace Editor
         private static Vector2Int hoveredTile = new Vector2Int(-1, -1);
         private static bool isMouseOverGrid = false;
         
-        // Hover highlight animation
-        private static float hoverHighlightOpacity = 0f;
-        private static float hoverHighlightTargetOpacity = 0f;
-        private static float hoverHighlightFadeSpeed = 5f; // Adjustable fade speed
+        // Hover highlight settings
         private static float hoverHighlightMaxOpacity = 0.15f; // Maximum opacity for highlight effect
         
-        // Cached highlight region for smooth fade-out
-        private static HashSet<Vector2Int> lastHighlightRegion = null;
-        
+        // Cached highlight region (legacy removed)
         private const string PREFS_PREFIX = "MapTerrainVisualizer_";
+        
+        // Per-frame hover connected-region cache
+        private static HashSet<Vector2Int> cachedHoverRegion = null;
+        private static Vector2Int cachedHoverTileForRegion = new Vector2Int(-1, -1);
+        private static int cachedRegionWidth = -1;
+        private static int cachedRegionHeight = -1;
+        private static MapTerrain cachedRegionTerrain = null;
         private const string PREFS_ENABLED = PREFS_PREFIX + "Enabled";
         private const string PREFS_SHOW_GRID = PREFS_PREFIX + "ShowGrid";
         private const string PREFS_TEXT_SIZE = PREFS_PREFIX + "TextSize";
@@ -232,6 +234,7 @@ namespace Editor
         private const string PREFS_LOD_SMALL_SCALE = PREFS_PREFIX + "LodSmallScale";
         private const string PREFS_CULL_ENABLED = PREFS_PREFIX + "CullEnabled";
         private const string PREFS_CULL_MIN_SEP = PREFS_PREFIX + "CullMinSep";
+        private const string PREFS_HIGHLIGHT_TINT = PREFS_PREFIX + "HighlightTint";
         
         private Vector2 scrollPosition;
         private List<MapTerrain> availableTerrains = new List<MapTerrain>();
@@ -269,6 +272,7 @@ namespace Editor
             // This ensures borders are recalculated after terrain changes
             islandCache.Clear();
             lastCachedTerrain = null;
+            cachedHoverRegion = null;
             SceneView.RepaintAll();
         }
         
@@ -391,6 +395,7 @@ namespace Editor
             lodSmallTextScale = EditorPrefs.GetFloat(PREFS_LOD_SMALL_SCALE, 0.85f);
             cullingEnabled = EditorPrefs.GetBool(PREFS_CULL_ENABLED, true);
             cullingMinSeparation = EditorPrefs.GetFloat(PREFS_CULL_MIN_SEP, 16f);
+            highlightTint = EditorPrefs.GetBool(PREFS_HIGHLIGHT_TINT, true);
             
             string colorStr = EditorPrefs.GetString(PREFS_TEXT_COLOR, ColorUtility.ToHtmlStringRGBA(Color.white));
             ColorUtility.TryParseHtmlString("#" + colorStr, out textColor);
@@ -429,6 +434,7 @@ namespace Editor
             EditorPrefs.SetFloat(PREFS_LOD_SMALL_SCALE, lodSmallTextScale);
             EditorPrefs.SetBool(PREFS_CULL_ENABLED, cullingEnabled);
             EditorPrefs.SetFloat(PREFS_CULL_MIN_SEP, cullingMinSeparation);
+            EditorPrefs.SetBool(PREFS_HIGHLIGHT_TINT, highlightTint);
             EditorPrefs.SetString(PREFS_TEXT_COLOR, ColorUtility.ToHtmlStringRGBA(textColor));
             EditorPrefs.SetString(PREFS_GRID_COLOR, ColorUtility.ToHtmlStringRGBA(gridColor));
             EditorPrefs.SetFloat(PREFS_WORLD_OFFSET + "_X", worldOffset.x);
@@ -609,6 +615,7 @@ namespace Editor
             EditorGUILayout.Space(5);
             EditorGUILayout.LabelField("Hover Settings", EditorStyles.miniBoldLabel);
             hoverHighlightMaxOpacity = EditorGUILayout.Slider("Highlight Opacity", hoverHighlightMaxOpacity, 0.05f, 0.5f);
+            highlightTint = EditorGUILayout.Toggle("Tint Highlight", highlightTint);
             
             if (EditorGUI.EndChangeCheck())
             {
@@ -839,7 +846,7 @@ namespace Editor
             lastFrameTime = currentTime;
             
             // Detect camera movement
-            bool cameraChanged = false;
+            // Track camera movement and stillness
             if (sceneView.camera != null)
             {
                 Vector3 currentCamPos = sceneView.camera.transform.position;
@@ -851,7 +858,6 @@ namespace Editor
                     Quaternion.Angle(currentCamRot, lastCameraRotation) > 0.1f ||
                     Mathf.Abs(currentFOV - lastCameraFOV) > 0.1f)
                 {
-                    cameraChanged = true;
                     cameraIsMoving = true;
                     cameraStillTime = 0f;
                 }
@@ -968,6 +974,7 @@ namespace Editor
             
             // Compute current highlight region (normal and paint modes) and draw immediately (no fade).
             HashSet<Vector2Int> currentHighlightRegion = null;
+            string highlightTerrainId = null;
             if (isMouseOverGrid && hoveredTile.x >= 0 && hoveredTile.y >= 0)
             {
                 int hoveredIndex = hoveredTile.y * width + hoveredTile.x;
@@ -980,7 +987,8 @@ namespace Editor
                         if (hoveredTerrainIdForHighlight == selectedBrushTerrain)
                         {
                             // Highlight current island (already selected terrain)
-                            currentHighlightRegion = FindConnectedRegion(selectedTerrain, hoveredTile, width, height);
+                            currentHighlightRegion = GetHoverConnectedRegion(selectedTerrain, hoveredTile, width, height);
+                            highlightTerrainId = selectedBrushTerrain;
                         }
                         else
                         {
@@ -999,27 +1007,41 @@ namespace Editor
                                 }
                             }
                             currentHighlightRegion = tilesToHighlight;
+                            highlightTerrainId = selectedBrushTerrain;
                         }
                     }
                     else if (!paintMode && !string.IsNullOrEmpty(hoveredTerrainIdForHighlight))
                     {
-                        currentHighlightRegion = FindConnectedRegion(selectedTerrain, hoveredTile, width, height);
+                        currentHighlightRegion = GetHoverConnectedRegion(selectedTerrain, hoveredTile, width, height);
+                        highlightTerrainId = hoveredTerrainIdForHighlight;
                     }
                 }
             }
             
             if (isRepaint && currentHighlightRegion != null && currentHighlightRegion.Count > 0)
             {
-                DrawRegionHighlight(currentHighlightRegion, startX, startZ, y, "");
+                DrawRegionHighlight(currentHighlightRegion, startX, startZ, y, highlightTint ? highlightTerrainId : "");
             }
             
             // Draw text labels if not in color-only mode
             if (isRepaint && displayMode != DisplayMode.ColorOnly)
             {
-                GUIStyle style = new GUIStyle();
-                style.fontSize = Mathf.RoundToInt(12 * textSize);
-                style.alignment = TextAnchor.MiddleCenter;
-                style.fontStyle = FontStyle.Bold; // Make text bolder for better visibility
+                // Prepare reusable styles for this frame
+                if (s_LabelStyle == null) s_LabelStyle = new GUIStyle();
+                if (s_LabelStyleSmall == null) s_LabelStyleSmall = new GUIStyle();
+                if (s_LabelStyleHover == null) s_LabelStyleHover = new GUIStyle();
+                int baseFont = Mathf.RoundToInt(12 * textSize);
+                int smallFont = Mathf.Max(8, Mathf.RoundToInt(baseFont * lodSmallTextScale));
+                int hoverFont = Mathf.RoundToInt(14 * textSize);
+                s_LabelStyle.alignment = TextAnchor.MiddleCenter;
+                s_LabelStyle.fontStyle = FontStyle.Bold;
+                s_LabelStyle.fontSize = baseFont;
+                s_LabelStyleSmall.alignment = TextAnchor.MiddleCenter;
+                s_LabelStyleSmall.fontStyle = FontStyle.Bold;
+                s_LabelStyleSmall.fontSize = smallFont;
+                s_LabelStyleHover.alignment = TextAnchor.MiddleLeft;
+                s_LabelStyleHover.fontStyle = FontStyle.Bold;
+                s_LabelStyleHover.fontSize = hoverFont;
                 
                 // Check if we're hovering over a tile and should show hover label
                 bool showHoverLabel = false;
@@ -1053,7 +1075,6 @@ namespace Editor
                     
                     // Batch GUI for island labels
                     Handles.BeginGUI();
-                    List<Rect> occupied = new List<Rect>();
                     
                     // Draw labels at their natural positions
                     foreach (var island in islands)
@@ -1081,8 +1102,6 @@ namespace Editor
                             
                             Color labelColor = ResolveLabelColorForTile(island.terrainId);
                             
-                            style.normal.textColor = labelColor;
-                            
                             bool isHoveredIsland = showHoverLabel && island.tiles.Contains(hoveredTile);
                             if (detail == LabelDetail.ChipOnly && !isHoveredIsland)
                             {
@@ -1095,12 +1114,12 @@ namespace Editor
                             }
                             else
                             {
-                                int baseFont = Mathf.RoundToInt(12 * textSize);
-                                style.fontSize = (detail == LabelDetail.SmallText) ? Mathf.Max(8, Mathf.RoundToInt(baseFont * lodSmallTextScale)) : baseFont;
-                                Rect rect = CalcLabelRect(worldPos, displayText, style);
+                                GUIStyle styleRef = (detail == LabelDetail.SmallText) ? s_LabelStyleSmall : s_LabelStyle;
+                                styleRef.normal.textColor = labelColor;
+                                Rect rect = CalcLabelRect(worldPos, displayText, styleRef);
                                 if (!cullingEnabled || !OverlapsGrid(cullGrid, rect, cullingMinSeparation))
                                 {
-                                    DrawLabelWithColoredIcon(worldPos, displayText, island.terrainId, style, labelColor, autoContrastText && displayMode == DisplayMode.Both);
+                                    DrawLabelWithColoredIcon(worldPos, displayText, island.terrainId, styleRef, labelColor);
                                 }
                             }
                         }
@@ -1141,8 +1160,6 @@ namespace Editor
                                 
                                 Color labelColor = ResolveLabelColorForTile(terrainId);
                                 
-                                style.normal.textColor = labelColor;
-                                
                                 float centerX = startX + col * TILE_SIZE + TILE_SIZE * 0.5f;
                                 float centerZ = startZ + row * TILE_SIZE + TILE_SIZE * 0.5f;
                                 Vector3 position = new Vector3(centerX, y, centerZ);
@@ -1167,12 +1184,12 @@ namespace Editor
                                 }
                                 else
                                 {
-                                    int baseFont = Mathf.RoundToInt(12 * textSize);
-                                    style.fontSize = (detail == LabelDetail.SmallText) ? Mathf.Max(8, Mathf.RoundToInt(baseFont * lodSmallTextScale)) : baseFont;
-                                    Rect rect = CalcLabelRect(position, displayText, style);
+                                    GUIStyle styleRef = (detail == LabelDetail.SmallText) ? s_LabelStyleSmall : s_LabelStyle;
+                                    styleRef.normal.textColor = labelColor;
+                                    Rect rect = CalcLabelRect(position, displayText, styleRef);
                                     if (!cullingEnabled || !OverlapsGrid(cullGridTiles, rect, cullingMinSeparation))
                                     {
-                                        DrawLabelWithColoredIcon(position, displayText, terrainId, style, labelColor, autoContrastText && displayMode == DisplayMode.Both);
+                                        DrawLabelWithColoredIcon(position, displayText, terrainId, styleRef, labelColor);
                                     }
                                 }
                             }
@@ -1192,7 +1209,7 @@ namespace Editor
                     if (paintMode)
                     {
                         // Always show paint mode tooltip
-                        DrawPaintModeHoverLabel(hoverPos, hoveredTerrainId, style, hoveredTile, width, height, startX, startZ, y, cameraDistance);
+                        DrawPaintModeHoverLabel(hoverPos, hoveredTerrainId, s_LabelStyle, hoveredTile, width, height, startX, startZ, y, cameraDistance);
                     }
                     else if (!showOnHoverOnly)  // Only show regular hover labels when NOT in hover-only mode
                     {
@@ -1201,14 +1218,13 @@ namespace Editor
                         
                         Color hoverLabelColor = ResolveHoverLabelColor(hoveredTerrainId);
                         
-                        // Make hover label slightly larger and with a highlight
-                        GUIStyle hoverStyle = new GUIStyle(style);
-                        hoverStyle.fontSize = Mathf.RoundToInt(14 * textSize); // Slightly larger
+                        // Reuse hover style
+                        GUIStyle hoverStyle = s_LabelStyleHover;
                         hoverStyle.normal.textColor = hoverLabelColor;
                         
                         // Batch begin for single hover label
                         Handles.BeginGUI();
-                        DrawLabelWithColoredIcon(hoverPos, hoverDisplayText, hoveredTerrainId, hoverStyle, hoverLabelColor, autoContrastText);
+                        DrawLabelWithColoredIcon(hoverPos, hoverDisplayText, hoveredTerrainId, hoverStyle, hoverLabelColor);
                         Handles.EndGUI();
                     }
                 }
@@ -1220,9 +1236,8 @@ namespace Editor
                 DrawBrushPreview(hoveredTile, width, height, startX, startZ, y);
             }
             
-            // Repaint when camera is moving, just stopped, or highlight is animating
-            if (cameraIsMoving || cameraStillTime < 1f || 
-                Mathf.Abs(hoverHighlightOpacity - hoverHighlightTargetOpacity) > 0.001f)
+            // Repaint when camera is moving or has just stopped
+            if (cameraIsMoving || cameraStillTime < 1f)
             {
                 sceneView.Repaint();
             }
@@ -1336,8 +1351,26 @@ namespace Editor
             // Trigger a repaint when hover state changes to keep non-paint mode responsive
             if (isMouseOverGrid != prevOver || hoveredTile != prevHovered)
             {
+                cachedHoverRegion = null;
                 SceneView.RepaintAll();
             }
+        }
+
+        private static HashSet<Vector2Int> GetHoverConnectedRegion(MapTerrain terrain, Vector2Int tile, int width, int height)
+        {
+            if (terrain == null) return null;
+            if (cachedHoverRegion != null && cachedRegionTerrain == terrain &&
+                cachedHoverTileForRegion == tile && cachedRegionWidth == width && cachedRegionHeight == height)
+            {
+                return cachedHoverRegion;
+            }
+            var region = FindConnectedRegion(terrain, tile, width, height);
+            cachedHoverRegion = region;
+            cachedRegionTerrain = terrain;
+            cachedHoverTileForRegion = tile;
+            cachedRegionWidth = width;
+            cachedRegionHeight = height;
+            return region;
         }
 
         private static void PaintTerrainDedup(Vector2Int centerTile, int width, int height)
@@ -1367,6 +1400,7 @@ namespace Editor
             {
                 EditorUtility.SetDirty(selectedTerrain);
                 if (islandCache.ContainsKey(selectedTerrain)) islandCache.Remove(selectedTerrain);
+                cachedHoverRegion = null;
                 SceneView.RepaintAll();
             }
         }
@@ -1476,8 +1510,8 @@ namespace Editor
             // Convert world position to GUI position
             Vector2 guiPos = HandleUtility.WorldToGUIPoint(tooltipWorldPos);
             
-            // Create style for the paint mode label
-            GUIStyle style = new GUIStyle(baseStyle);
+            // Create style for the paint mode label (reuse hover style baseline)
+            GUIStyle style = s_LabelStyleHover ?? new GUIStyle(baseStyle);
             style.fontSize = Mathf.RoundToInt(12 * textSize);
             style.alignment = TextAnchor.MiddleLeft;
             style.fontStyle = FontStyle.Bold;
@@ -1547,6 +1581,16 @@ namespace Editor
                 maxWidth + padding * 2,
                 totalHeight + padding * 2
             );
+            // Clamp tooltip box to SceneView viewport
+            var svClamp = SceneView.currentDrawingSceneView;
+            if (svClamp != null)
+            {
+                float vw = svClamp.position.width;
+                float vh = svClamp.position.height;
+                float pad2 = 8f;
+                bgRect.x = Mathf.Clamp(bgRect.x, pad2, vw - bgRect.width - pad2);
+                bgRect.y = Mathf.Clamp(bgRect.y, pad2, vh - bgRect.height - pad2);
+            }
             
             // Semi-transparent background
             Color bgColor = new Color(0.1f, 0.1f, 0.1f, 0.85f);
@@ -1926,8 +1970,17 @@ namespace Editor
         {
             if (region.Count == 0) return;
             
-            // Create a subtle white overlay with animated opacity
-            Color highlightColor = new Color(1f, 1f, 1f, hoverHighlightMaxOpacity);
+            // Create a subtle overlay; optionally tint by terrain color
+            Color highlightColor;
+            if (!string.IsNullOrEmpty(terrainId) && terrainDatabase != null)
+            {
+                Color baseColor = terrainDatabase.GetTerrainColor(terrainId, Color.gray);
+                highlightColor = new Color(baseColor.r, baseColor.g, baseColor.b, hoverHighlightMaxOpacity);
+            }
+            else
+            {
+                highlightColor = new Color(1f, 1f, 1f, hoverHighlightMaxOpacity);
+            }
             
             // Draw highlight overlay for each tile in the region
             foreach (var tile in region)
@@ -1984,7 +2037,17 @@ namespace Editor
             
             // Draw the border edges with animated opacity
             float borderOpacity = 0.3f;
-            Handles.color = new Color(1f, 1f, 1f, borderOpacity);
+            Color borderColor = Color.white;
+            if (!string.IsNullOrEmpty(terrainId) && terrainDatabase != null)
+            {
+                Color baseColor = terrainDatabase.GetTerrainColor(terrainId, Color.gray);
+                borderColor = new Color(baseColor.r * 0.8f, baseColor.g * 0.8f, baseColor.b * 0.8f, borderOpacity);
+            }
+            else
+            {
+                borderColor = new Color(1f, 1f, 1f, borderOpacity);
+            }
+            Handles.color = borderColor;
             foreach (var edge in edges)
             {
                 Vector3 start = new Vector3(
@@ -2002,7 +2065,7 @@ namespace Editor
             }
         }
         
-        private static void DrawLabelWithColoredIcon(Vector3 position, string text, string terrainId, GUIStyle textStyle, Color textColor, bool drawShadow)
+        private static void DrawLabelWithColoredIcon(Vector3 position, string text, string terrainId, GUIStyle textStyle, Color textColor)
         {
             // Convert world position to GUI position
             Vector2 guiPos = HandleUtility.WorldToGUIPoint(position);
@@ -2018,6 +2081,22 @@ namespace Editor
             
             // Position for the whole label (centered)
             Rect labelRect = new Rect(guiPos.x - totalWidth / 2, guiPos.y - textSize.y / 2, totalWidth, textSize.y);
+
+            // Only render labels when the tile is on-screen; if on-screen, clamp rect inside view
+            var sv = SceneView.currentDrawingSceneView;
+            if (sv != null)
+            {
+                float viewW = sv.position.width;
+                float viewH = sv.position.height;
+                bool tileOnScreen = guiPos.x >= 0 && guiPos.x <= viewW && guiPos.y >= 0 && guiPos.y <= viewH;
+                if (!tileOnScreen)
+                {
+                    return; // Off-screen: do not draw the label
+                }
+                float pad = 8f;
+                labelRect.x = Mathf.Clamp(labelRect.x, pad, viewW - labelRect.width - pad);
+                labelRect.y = Mathf.Clamp(labelRect.y, pad, viewH - labelRect.height - pad);
+            }
             
             // Always draw an outline for better readability
             // Draw multiple outline passes for stronger effect
@@ -2324,6 +2403,12 @@ namespace Editor
         private static float lodSmallTextScale = 0.85f;
         private static bool cullingEnabled = true;
         private static float cullingMinSeparation = 16f;
+        private static bool highlightTint = true;
+
+        // Reusable GUI styles
+        private static GUIStyle s_LabelStyle;
+        private static GUIStyle s_LabelStyleSmall;
+        private static GUIStyle s_LabelStyleHover;
 
     private static LabelDetail GetDetailForZoom(float pixelsPerTile)
     {
