@@ -150,6 +150,18 @@ namespace Editor
             }
         }
     }
+
+    // Screen-space label node cached across frames for relaxed layout
+    class LabelNode
+    {
+        public string key;
+        public Vector2 anchorGui;
+        public Vector2 posGui;
+        public float width;
+        public float height;
+        public float priority;
+        public bool seenThisFrame;
+    }
     
     public class TerrainPaintToolWindow : EditorWindow
     {
@@ -176,6 +188,19 @@ namespace Editor
         private static float lastFrameTime = 0f;
         // Smoothed zoom metric (px/tile) to stabilize LOD while zooming
         private static float smoothedPixelsPerTile = -1f;
+        
+        // Screen-space relaxation state/tunables
+        private static Dictionary<string, LabelNode> s_LabelNodes = new Dictionary<string, LabelNode>();
+        private static bool relaxEnabled = true;
+        private static int relaxIterations = 3;
+        private static float relaxAnchorK = 0.18f;
+        private static float relaxMaxStepPx = 3.0f;
+        private static float relaxRadiusPxBase = 40f;
+        private static bool relaxFreezeWhileMoving = true;
+        private static int relaxLargeIslandTiles = 80;
+        private static float relaxPriorityLarge = 1.6f;
+        private static float relaxPriorityHover = 3.0f;
+        private static float relaxViewportPad = 8f;
         
         // Camera movement detection
         private static Vector3 lastCameraPosition;
@@ -245,6 +270,7 @@ namespace Editor
         private const float TILE_SIZE = 5f;
         private const float LABEL_ICON_SIZE = 8f;
         private const float LABEL_ICON_PADDING = 3f;
+        private static bool roundChips = true; // draw chips as circles to avoid blocky fade
         
         [MenuItem("Window/Terrain Paint Tool")]
         public static void ShowWindow()
@@ -272,6 +298,7 @@ namespace Editor
             islandCache.Clear();
             lastCachedTerrain = null;
             cachedHoverRegion = null;
+            s_LabelNodes.Clear();
             SceneView.RepaintAll();
         }
         
@@ -394,6 +421,7 @@ namespace Editor
             cullingEnabled = EditorPrefs.GetBool(PREFS_CULL_ENABLED, true);
             cullingMinSeparation = EditorPrefs.GetFloat(PREFS_CULL_MIN_SEP, 16f);
             highlightTint = EditorPrefs.GetBool(PREFS_HIGHLIGHT_TINT, true);
+            roundChips = EditorPrefs.GetBool(PREFS_PREFIX + "RoundChips", true);
             lodCrossfadeBandPx = EditorPrefs.GetFloat(PREFS_LOD_CROSSFADE, 8f);
             
             string colorStr = EditorPrefs.GetString(PREFS_TEXT_COLOR, ColorUtility.ToHtmlStringRGBA(Color.white));
@@ -412,6 +440,18 @@ namespace Editor
             {
                 selectedTerrain = AssetDatabase.LoadAssetAtPath<MapTerrain>(terrainPath);
             }
+            
+            // Relaxation prefs
+            relaxEnabled = EditorPrefs.GetBool(PREFS_PREFIX + "RelaxEnabled", true);
+            relaxIterations = EditorPrefs.GetInt(PREFS_PREFIX + "RelaxIters", 3);
+            relaxAnchorK = EditorPrefs.GetFloat(PREFS_PREFIX + "RelaxAnchorK", 0.18f);
+            relaxMaxStepPx = EditorPrefs.GetFloat(PREFS_PREFIX + "RelaxMaxStep", 3.0f);
+            relaxRadiusPxBase = EditorPrefs.GetFloat(PREFS_PREFIX + "RelaxRadius", 40f);
+            relaxFreezeWhileMoving = EditorPrefs.GetBool(PREFS_PREFIX + "RelaxFreezeMove", true);
+            relaxLargeIslandTiles = EditorPrefs.GetInt(PREFS_PREFIX + "RelaxLargeTiles", 80);
+            relaxPriorityLarge = EditorPrefs.GetFloat(PREFS_PREFIX + "RelaxPrLarge", 1.6f);
+            relaxPriorityHover = EditorPrefs.GetFloat(PREFS_PREFIX + "RelaxPrHover", 3.0f);
+            relaxViewportPad = EditorPrefs.GetFloat(PREFS_PREFIX + "RelaxViewportPad", 8f);
         }
         
         private void SaveSettings()
@@ -432,6 +472,7 @@ namespace Editor
             EditorPrefs.SetBool(PREFS_CULL_ENABLED, cullingEnabled);
             EditorPrefs.SetFloat(PREFS_CULL_MIN_SEP, cullingMinSeparation);
             EditorPrefs.SetBool(PREFS_HIGHLIGHT_TINT, highlightTint);
+            EditorPrefs.SetBool(PREFS_PREFIX + "RoundChips", roundChips);
             EditorPrefs.SetFloat(PREFS_LOD_CROSSFADE, lodCrossfadeBandPx);
             EditorPrefs.SetString(PREFS_TEXT_COLOR, ColorUtility.ToHtmlStringRGBA(textColor));
             EditorPrefs.SetString(PREFS_GRID_COLOR, ColorUtility.ToHtmlStringRGBA(gridColor));
@@ -448,6 +489,18 @@ namespace Editor
             {
                 EditorPrefs.SetString(PREFS_SELECTED_TERRAIN, "");
             }
+
+            // Relaxation prefs
+            EditorPrefs.SetBool(PREFS_PREFIX + "RelaxEnabled", relaxEnabled);
+            EditorPrefs.SetInt(PREFS_PREFIX + "RelaxIters", relaxIterations);
+            EditorPrefs.SetFloat(PREFS_PREFIX + "RelaxAnchorK", relaxAnchorK);
+            EditorPrefs.SetFloat(PREFS_PREFIX + "RelaxMaxStep", relaxMaxStepPx);
+            EditorPrefs.SetFloat(PREFS_PREFIX + "RelaxRadius", relaxRadiusPxBase);
+            EditorPrefs.SetBool(PREFS_PREFIX + "RelaxFreezeMove", relaxFreezeWhileMoving);
+            EditorPrefs.SetInt(PREFS_PREFIX + "RelaxLargeTiles", relaxLargeIslandTiles);
+            EditorPrefs.SetFloat(PREFS_PREFIX + "RelaxPrLarge", relaxPriorityLarge);
+            EditorPrefs.SetFloat(PREFS_PREFIX + "RelaxPrHover", relaxPriorityHover);
+            EditorPrefs.SetFloat(PREFS_PREFIX + "RelaxViewportPad", relaxViewportPad);
         }
         
         private void RefreshTerrainList()
@@ -606,6 +659,23 @@ namespace Editor
                 cullingEnabled = EditorGUILayout.Toggle("Enable Screen Culling", cullingEnabled);
                 if (cullingEnabled)
                     cullingMinSeparation = EditorGUILayout.Slider("Min Separation (px)", cullingMinSeparation, 4f, 64f);
+
+                EditorGUILayout.Space(8);
+                EditorGUILayout.LabelField("Label Layout", EditorStyles.miniBoldLabel);
+                relaxEnabled = EditorGUILayout.Toggle("Screen-space Relaxation", relaxEnabled);
+                if (relaxEnabled)
+                {
+                    EditorGUI.indentLevel++;
+                    relaxIterations = EditorGUILayout.IntSlider("Iterations/frame", relaxIterations, 1, 6);
+                    relaxAnchorK = EditorGUILayout.Slider("Anchor Spring", relaxAnchorK, 0.05f, 0.4f);
+                    relaxMaxStepPx = EditorGUILayout.Slider("Max Push/Iter (px)", relaxMaxStepPx, 0.5f, 8f);
+                    relaxRadiusPxBase = EditorGUILayout.Slider("Max Radius (px)", relaxRadiusPxBase, 10f, 80f);
+                    relaxFreezeWhileMoving = EditorGUILayout.Toggle("Freeze While Moving", relaxFreezeWhileMoving);
+                    relaxLargeIslandTiles = EditorGUILayout.IntSlider("Large Island Tiles", relaxLargeIslandTiles, 20, 200);
+                    relaxPriorityLarge = EditorGUILayout.Slider("Priority: Large Island", relaxPriorityLarge, 1.0f, 3.0f);
+                    relaxPriorityHover = EditorGUILayout.Slider("Priority: Hovered", relaxPriorityHover, 1.0f, 5.0f);
+                    EditorGUI.indentLevel--;
+                }
 
                 EditorGUILayout.Space(5);
                 EditorGUILayout.LabelField("Hover/Highlight", EditorStyles.miniBoldLabel);
@@ -1122,80 +1192,206 @@ namespace Editor
                     
                     // Batch GUI for island labels
                     Handles.BeginGUI();
-                    
-                    // Draw labels at their natural positions
+
+                    // Build frame label nodes list
+                    var usedKeys = new HashSet<string>();
+                    var frameNodes = new List<LabelNode>(64);
+
                     foreach (var island in islands)
                     {
                         if (string.IsNullOrEmpty(island.terrainId))
                             continue;
-                        
-                        // Skip this island's label if we're hovering over it (will draw hover/paint tooltip instead)
-                        // Check if the hovered tile is part of THIS specific island
                         if (showHoverLabel && island.tiles.Contains(hoveredTile))
                             continue;
-                        
+
                         foreach (var labelPos in island.labelPositions)
                         {
                             float centerX = startX + labelPos.x * TILE_SIZE + TILE_SIZE * 0.5f;
                             float centerZ = startZ + labelPos.y * TILE_SIZE + TILE_SIZE * 0.5f;
                             Vector3 worldPos = new Vector3(centerX, y, centerZ);
-                            
-                            string key = island.terrainId + "|" + textDisplayMode;
-                            if (!frameTextCache.TryGetValue(key, out string displayText))
+
+                            string textKey = island.terrainId + "|" + textDisplayMode;
+                            if (!frameTextCache.TryGetValue(textKey, out string displayText))
                             {
                                 displayText = GetTerrainDisplayText(island.terrainId);
-                                frameTextCache[key] = displayText;
+                                frameTextCache[textKey] = displayText;
                             }
-                            
+
                             Color labelColor = ResolveLabelColorForTile(island.terrainId);
-                            
-                            bool isHoveredIsland = showHoverLabel && island.tiles.Contains(hoveredTile);
                             bool wantText = (displayMode != DisplayMode.ColorOnly) && lodLabelAlphaScale > 0f;
                             bool wantChip = (displayMode != DisplayMode.TextOnly) && lodChipAlphaScale > 0f;
+                            if (!wantText && !wantChip) continue;
 
-                            // Draw text first (so chip can blend behind during crossfade)
-                            if (wantText)
+                            // Compute GUI anchor and label size for layout
+                            Vector2 anchorGui = HandleUtility.WorldToGUIPoint(worldPos);
+                            GUIStyle styleRef = (detail == LabelDetail.SmallText) ? s_LabelStyleSmall : s_LabelStyle;
+                            styleRef.normal.textColor = labelColor;
+                            s_LabelContent.text = displayText;
+                            Vector2 size = styleRef.CalcSize(s_LabelContent);
+                            float totalWidth = size.x + LABEL_ICON_SIZE + LABEL_ICON_PADDING * 2f;
+                            float totalHeight = size.y;
+
+                            // Node key: terrain + label tile
+                            string nodeKey = island.terrainId + "|" + Mathf.RoundToInt(labelPos.x) + "x" + Mathf.RoundToInt(labelPos.y) + "|" + (int)textDisplayMode;
+                            usedKeys.Add(nodeKey);
+                            if (!s_LabelNodes.TryGetValue(nodeKey, out var node))
                             {
-                                GUIStyle styleRef = (detail == LabelDetail.SmallText) ? s_LabelStyleSmall : s_LabelStyle;
-                                styleRef.normal.textColor = labelColor;
-                                // Compute rect for overlap attenuation
-                                Rect rect = CalcLabelRect(worldPos, displayText, styleRef);
-                                // Overlap attenuation factor based on grid occupancy (soft, not a gate)
-                                float overlapAlpha = 1f;
-                                {
-                                    float occ = cameraIsMoving ? 0f : OverlapRatio(cullGrid, rect, effectiveMinSeparation);
-                                    // Map occlusion to alpha (higher occlusion -> lower alpha), keep small floor so it can still LOD-fade
-                                    overlapAlpha = Mathf.Clamp01(1f - occ * 1.2f);
-                                    if (isHoveredIsland) overlapAlpha = 1f; // keep hovered strong
-                                }
-                                // Stateful per-label smoothing
-                                string k = island.terrainId + "|" + Mathf.RoundToInt(labelPos.x) + "x" + Mathf.RoundToInt(labelPos.y);
-                                float prev = 0f; labelAlphaStates.TryGetValue(k, out prev);
-                                float target = overlapAlpha;
-                                if (cameraIsMoving) target = Mathf.Max(prev, target); // don't decrease while moving
-                                float dt = Mathf.Min(0.1f, (float)EditorApplication.timeSinceStartup - lastFrameTime);
-                                float newAlpha = Mathf.MoveTowards(prev, target, 10f * dt);
-                                labelAlphaStates[k] = newAlpha;
-                                if (newAlpha > 0.02f)
-                                {
-                                    DrawLabelWithColoredIcon(worldPos, displayText, island.terrainId, styleRef, labelColor, newAlpha);
-                                    // Only contribute to occupancy when significantly visible and not crossfading
-                                    if (newAlpha >= 0.5f && cullingEnabled && !lodCrossFading && !cameraIsMoving)
-                                    {
-                                        OverlapsGrid(cullGrid, rect, effectiveMinSeparation);
-                                    }
-                                }
+                                node = new LabelNode { key = nodeKey, posGui = anchorGui };
+                                s_LabelNodes[nodeKey] = node;
                             }
-                            // Draw chip too if requested (skip on hovered to avoid clutter)
-                            if (wantChip && !isHoveredIsland)
+                            node.anchorGui = anchorGui;
+                            node.width = totalWidth;
+                            node.height = totalHeight;
+                            node.seenThisFrame = true;
+                            // Priority: large islands get boost; hovered handled separately
+                            float pr = 1f;
+                            if (island.tiles != null && island.tiles.Count >= relaxLargeIslandTiles) pr *= relaxPriorityLarge;
+                            node.priority = pr;
+
+                            frameNodes.Add(node);
+
+                            // Draw chips at anchor regardless of label layout
+                            if (wantChip)
                             {
-                                Rect chipRect = CalcChipRect(worldPos);
-                                if (cullingEnabled) OverlapsGrid(cullGrid, chipRect, cullingMinSeparation); // register occupancy only
                                 DrawColorChip(worldPos, island.terrainId);
                             }
                         }
                     }
-                    
+
+                    // Relax layout in screen-space (no leaders)
+                    if (relaxEnabled && frameNodes.Count > 0)
+                    {
+                        // Radius shrinks with zoom-in to keep labels tight
+                        float radiusScale = Mathf.Clamp(80f / Mathf.Max(1f, smoothedPixelsPerTile), 0.4f, 1.0f);
+                        float maxRadius = relaxRadiusPxBase * radiusScale;
+                        var sv = SceneView.currentDrawingSceneView;
+                        float viewW = sv != null ? sv.position.width : Screen.width;
+                        float viewH = sv != null ? sv.position.height : Screen.height;
+
+                        for (int iter = 0; iter < Mathf.Max(1, relaxIterations); iter++)
+                        {
+                            // Anchor spring
+                            foreach (var n in frameNodes)
+                            {
+                                n.posGui += (n.anchorGui - n.posGui) * Mathf.Clamp01(relaxAnchorK);
+                            }
+
+                            // Repulsion (freeze if moving)
+                            if (!(relaxFreezeWhileMoving && cameraIsMoving))
+                            {
+                                for (int i = 0; i < frameNodes.Count; i++)
+                                {
+                                    var a = frameNodes[i];
+                                    for (int j = i + 1; j < frameNodes.Count; j++)
+                                    {
+                                        var b = frameNodes[j];
+                                        // AABB overlap check using centers and sizes
+                                        float ax = a.posGui.x, ay = a.posGui.y;
+                                        float bx = b.posGui.x, by = b.posGui.y;
+                                        float halfW = (a.width + b.width) * 0.5f;
+                                        float halfH = (a.height + b.height) * 0.5f;
+                                        float dx = ax - bx;
+                                        float dy = ay - by;
+                                        float ox = halfW - Mathf.Abs(dx);
+                                        float oy = halfH - Mathf.Abs(dy);
+                                        if (ox > 0 && oy > 0)
+                                        {
+                                            // Push along axis of least penetration
+                                            Vector2 push;
+                                            if (ox < oy)
+                                            {
+                                                push = new Vector2(Mathf.Sign(dx) * Mathf.Min(ox, relaxMaxStepPx), 0f);
+                                            }
+                                            else
+                                            {
+                                                push = new Vector2(0f, Mathf.Sign(dy) * Mathf.Min(oy, relaxMaxStepPx));
+                                            }
+                                            float pa = Mathf.Max(0.001f, a.priority);
+                                            float pb = Mathf.Max(0.001f, b.priority);
+                                            float sum = pa + pb;
+                                            // High priority yields less
+                                            a.posGui += push * (pb / sum);
+                                            b.posGui -= push * (pa / sum);
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Clamp to radius and viewport
+                            foreach (var n in frameNodes)
+                            {
+                                // Max displacement from anchor
+                                Vector2 d = n.posGui - n.anchorGui;
+                                float md = d.magnitude;
+                                if (md > maxRadius)
+                                {
+                                    n.posGui = n.anchorGui + d * (maxRadius / md);
+                                }
+                                // Viewport clamp
+                                float pad = relaxViewportPad;
+                                n.posGui.x = Mathf.Clamp(n.posGui.x, pad + n.width * 0.5f, viewW - pad - n.width * 0.5f);
+                                n.posGui.y = Mathf.Clamp(n.posGui.y, pad + n.height * 0.5f, viewH - pad - n.height * 0.5f);
+                            }
+                        }
+                    }
+
+                    // Draw labels at relaxed positions, with sticky alpha-up smoothing
+                    foreach (var island in islands)
+                    {
+                        if (string.IsNullOrEmpty(island.terrainId)) continue;
+                        if (showHoverLabel && island.tiles.Contains(hoveredTile)) continue;
+
+                        foreach (var labelPos in island.labelPositions)
+                        {
+                            float centerX = startX + labelPos.x * TILE_SIZE + TILE_SIZE * 0.5f;
+                            float centerZ = startZ + labelPos.y * TILE_SIZE + TILE_SIZE * 0.5f;
+                            Vector3 worldPos = new Vector3(centerX, y, centerZ);
+
+                            string textKey = island.terrainId + "|" + textDisplayMode;
+                            if (!frameTextCache.TryGetValue(textKey, out string displayText))
+                            {
+                                displayText = GetTerrainDisplayText(island.terrainId);
+                                frameTextCache[textKey] = displayText;
+                            }
+                            Color labelColor = ResolveLabelColorForTile(island.terrainId);
+                            bool wantText = (displayMode != DisplayMode.ColorOnly) && lodLabelAlphaScale > 0f;
+                            if (!wantText) continue;
+                            GUIStyle styleRef = (detail == LabelDetail.SmallText) ? s_LabelStyleSmall : s_LabelStyle;
+                            styleRef.normal.textColor = labelColor;
+
+                            string k = island.terrainId + "|" + Mathf.RoundToInt(labelPos.x) + "x" + Mathf.RoundToInt(labelPos.y);
+                            float prev = 0f; labelAlphaStates.TryGetValue(k, out prev);
+                            float target = 1f;
+                            if (cameraIsMoving) target = Mathf.Max(prev, target);
+                            float dt = deltaTime;
+                            float newAlpha = Mathf.MoveTowards(prev, target, 10f * dt);
+                            labelAlphaStates[k] = newAlpha;
+                            if (newAlpha <= 0.02f) continue;
+
+                            // Fetch node position
+                            string nodeKey = island.terrainId + "|" + Mathf.RoundToInt(labelPos.x) + "x" + Mathf.RoundToInt(labelPos.y) + "|" + (int)textDisplayMode;
+                            if (s_LabelNodes.TryGetValue(nodeKey, out var node))
+                            {
+                                DrawLabelWithColoredIconAtGui(worldPos, node.posGui, displayText, island.terrainId, styleRef, labelColor, newAlpha);
+                            }
+                            else
+                            {
+                                // Fallback to anchor if cache missed
+                                Vector2 anchorGui = HandleUtility.WorldToGUIPoint(worldPos);
+                                DrawLabelWithColoredIconAtGui(worldPos, anchorGui, displayText, island.terrainId, styleRef, labelColor, newAlpha);
+                            }
+                        }
+                    }
+
+                    // Cleanup cache entries not used this frame (mark-and-sweep)
+                    foreach (var kv in s_LabelNodes.ToList())
+                    {
+                        if (!usedKeys.Contains(kv.Key))
+                            s_LabelNodes.Remove(kv.Key);
+                        else
+                            kv.Value.seenThisFrame = false;
+                    }
+
                     Handles.EndGUI();
                 }
                 
@@ -1539,7 +1735,7 @@ namespace Editor
                     string currentDisplay = GetTerrainDisplayText(currentTerrainId);
                     currentDisplay = currentDisplay.Replace("\n", " / ");
                     Color currentColor = terrainDatabase?.GetTerrainColor(currentTerrainId, Color.gray) ?? Color.gray;
-                    labels.Add(($"Current: {currentDisplay}", currentColor, new Color(0.9f, 0.9f, 0.9f, 1f)));
+                    labels.Add(($"Current tile: {currentDisplay}", currentColor, new Color(0.9f, 0.9f, 0.9f, 1f)));
                 }
                 
                 // Paint as terrain
@@ -1548,7 +1744,7 @@ namespace Editor
                     string paintDisplay = GetTerrainDisplayText(selectedBrushTerrain);
                     paintDisplay = paintDisplay.Replace("\n", " / ");
                     Color paintColor = terrainDatabase?.GetTerrainColor(selectedBrushTerrain, Color.gray) ?? Color.gray;
-                    labels.Add(($"Paint as: {paintDisplay}", paintColor, Color.white));
+                    labels.Add(($"Brush: {paintDisplay}", paintColor, Color.white));
                 }
                 else
                 {
@@ -2170,6 +2366,94 @@ namespace Editor
                 textSize.x, labelRect.height);
             GUI.Label(textRect, s_LabelContent, textStyle);
         }
+
+        // Draw label at an explicit GUI position, but compute edge-fade from the anchor world position
+        private static void DrawLabelWithColoredIconAtGui(Vector3 anchorWorld, Vector2 guiPos, string text, string terrainId, GUIStyle textStyle, Color textColor, float extraAlpha = 1f)
+        {
+            // Compute anchor GUI for edge fade
+            Vector2 anchorGui = HandleUtility.WorldToGUIPoint(anchorWorld);
+
+            // Calculate text dimensions
+            s_LabelContent.text = text;
+            Vector2 textSize = textStyle.CalcSize(s_LabelContent);
+
+            float iconSize = 8f;
+            float iconPadding = 3f;
+            float totalWidth = textSize.x + iconSize + iconPadding * 2f;
+
+            // Position rect around provided GUI position
+            Rect labelRect = new Rect(guiPos.x - totalWidth / 2f, guiPos.y - textSize.y / 2f, totalWidth, textSize.y);
+
+            // Edge fade computed from anchor position, clamp rect into view to stay readable while fading
+            float alphaMul = 1f;
+            var sv = SceneView.currentDrawingSceneView;
+            if (sv != null)
+            {
+                float viewW = sv.position.width;
+                float viewH = sv.position.height;
+                float pad = 8f;
+                float dx = (anchorGui.x < 0) ? -anchorGui.x : (anchorGui.x > viewW ? anchorGui.x - viewW : 0f);
+                float dy = (anchorGui.y < 0) ? -anchorGui.y : (anchorGui.y > viewH ? anchorGui.y - viewH : 0f);
+                float d = Mathf.Max(dx, dy);
+                float band = 24f;
+                alphaMul = Mathf.Clamp01(1f - d / band);
+                // Clamp visual rect
+                labelRect.x = Mathf.Clamp(labelRect.x, pad, viewW - labelRect.width - pad);
+                labelRect.y = Mathf.Clamp(labelRect.y, pad, viewH - labelRect.height - pad);
+                if (alphaMul <= 0.001f) return;
+            }
+
+            // Outline
+            GUIStyle outlineStyle = new GUIStyle(textStyle);
+            Color outlineColor = (textColor == Color.black) ? Color.white : Color.black;
+            outlineStyle.normal.textColor = new Color(outlineColor.r, outlineColor.g, outlineColor.b, 0.8f * alphaMul * lodLabelAlphaScale * extraAlpha);
+            Vector2[] outlineOffsets = new Vector2[]
+            {
+                new Vector2(-1, -1), new Vector2(0, -1), new Vector2(1, -1),
+                new Vector2(-1, 0),                      new Vector2(1, 0),
+                new Vector2(-1, 1),  new Vector2(0, 1),  new Vector2(1, 1)
+            };
+            foreach (var offset in outlineOffsets)
+            {
+                Rect outlineTextRect = new Rect(labelRect.x + iconSize + iconPadding * 2 + offset.x,
+                                                labelRect.y + offset.y,
+                                                textSize.x,
+                                                labelRect.height);
+                GUI.Label(outlineTextRect, s_LabelContent, outlineStyle);
+
+                if (terrainDatabase != null)
+                {
+                    Rect outlineIconRect = new Rect(labelRect.x + iconPadding + offset.x,
+                        labelRect.y + (labelRect.height - iconSize) / 2 + offset.y,
+                        iconSize, iconSize);
+                    EditorGUI.DrawRect(outlineIconRect, new Color(outlineColor.r, outlineColor.g, outlineColor.b, 0.3f));
+                }
+            }
+
+            // Icon
+            if (terrainDatabase != null)
+            {
+                Color terrainColor = terrainDatabase.GetTerrainColor(terrainId, Color.gray);
+                Rect iconRect = new Rect(labelRect.x + iconPadding,
+                                         labelRect.y + (labelRect.height - iconSize) / 2,
+                                         iconSize, iconSize);
+
+                Color fill = terrainColor; fill.a *= (alphaMul * lodLabelAlphaScale * extraAlpha);
+                EditorGUI.DrawRect(iconRect, fill);
+                Color borderColor = (textColor == Color.black) ? Color.black : Color.white;
+                borderColor.a *= (alphaMul * lodLabelAlphaScale * extraAlpha);
+                Handles.DrawBezier(new Vector3(iconRect.x, iconRect.y, 0),
+                                   new Vector3(iconRect.x + iconSize, iconRect.y, 0),
+                                   new Vector3(iconRect.x, iconRect.y, 0),
+                                   new Vector3(iconRect.x + iconSize, iconRect.y, 0),
+                                   borderColor, null, 1f);
+            }
+
+            // Text
+            textStyle.normal.textColor = new Color(textColor.r, textColor.g, textColor.b, textColor.a * alphaMul * lodLabelAlphaScale * extraAlpha);
+            Rect textRect = new Rect(labelRect.x + iconSize + iconPadding * 2, labelRect.y, textSize.x, labelRect.height);
+            GUI.Label(textRect, s_LabelContent, textStyle);
+        }
         
         private static void DrawIslandBorders(TerrainIsland island, int mapWidth, int mapHeight, float startX, float startZ, float y, Color borderColor)
         {
@@ -2554,16 +2838,31 @@ namespace Editor
 
             // Draw chip background with LOD crossfade alpha
             Color fill = terrainColor; fill.a *= (alpha * lodChipAlphaScale);
-            EditorGUI.DrawRect(chipRect, fill);
-            // Draw outline with same fade
-            Vector3[] verts = new Vector3[]
+            if (roundChips)
             {
-                new Vector3(chipRect.x, chipRect.y, 0),
-                new Vector3(chipRect.x + chipRect.width, chipRect.y, 0),
-                new Vector3(chipRect.x + chipRect.width, chipRect.y + chipRect.height, 0),
-                new Vector3(chipRect.x, chipRect.y + chipRect.height, 0)
-            };
-            Handles.DrawSolidRectangleWithOutline(verts, Color.clear, new Color(0f,0f,0f, alpha * lodChipAlphaScale));
+                Handles.BeginGUI();
+                Handles.color = fill;
+                Vector3 center = new Vector3(chipRect.x + chipRect.width * 0.5f, chipRect.y + chipRect.height * 0.5f, 0);
+                float radius = LABEL_ICON_SIZE * 0.5f;
+                Handles.DrawSolidDisc(center, Vector3.forward, radius);
+                // Outline
+                Handles.color = new Color(0f,0f,0f, alpha * lodChipAlphaScale);
+                Handles.DrawWireDisc(center, Vector3.forward, radius);
+                Handles.EndGUI();
+            }
+            else
+            {
+                EditorGUI.DrawRect(chipRect, fill);
+                // Outline with same fade
+                Vector3[] verts = new Vector3[]
+                {
+                    new Vector3(chipRect.x, chipRect.y, 0),
+                    new Vector3(chipRect.x + chipRect.width, chipRect.y, 0),
+                    new Vector3(chipRect.x + chipRect.width, chipRect.y + chipRect.height, 0),
+                    new Vector3(chipRect.x, chipRect.y + chipRect.height, 0)
+                };
+                Handles.DrawSolidRectangleWithOutline(verts, Color.clear, new Color(0f,0f,0f, alpha * lodChipAlphaScale));
+            }
         }
 
         private static float min4(float a,float b,float c,float d)
