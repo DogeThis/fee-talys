@@ -759,9 +759,53 @@ namespace Editor
                     
                     EditorGUILayout.Space(5);
                     
-                    // Selected terrain with color chip
+                    // Status: Hovering over
                     EditorGUILayout.BeginHorizontal();
-                    EditorGUILayout.LabelField("Selected Terrain:", GUILayout.Width(100));
+                    EditorGUILayout.LabelField("Hovering over:", GUILayout.Width(100));
+                    string hoveredIdForPanel = null;
+                    if (isMouseOverGrid && selectedTerrain != null)
+                    {
+                        int idx = hoveredTile.y * selectedTerrain.m_Width + hoveredTile.x;
+                        if (idx >= 0 && selectedTerrain.m_Terrains != null && idx < selectedTerrain.m_Terrains.Length)
+                        {
+                            hoveredIdForPanel = selectedTerrain.m_Terrains[idx];
+                        }
+                    }
+                    if (!string.IsNullOrEmpty(hoveredIdForPanel))
+                    {
+                        if (terrainDatabase != null)
+                        {
+                            Color hColor = terrainDatabase.GetTerrainColor(hoveredIdForPanel, Color.gray);
+                            Rect colorRectH = GUILayoutUtility.GetRect(20, 20, GUILayout.Width(20));
+                            EditorGUI.DrawRect(colorRectH, hColor);
+                            EditorGUI.DrawRect(colorRectH, new Color(0, 0, 0, 0.2f));
+                        }
+                        string displayNameH = hoveredIdForPanel;
+                        if (terrainDatabase != null)
+                        {
+                            var tH = terrainDatabase.GetTerrainType(hoveredIdForPanel);
+                            if (tH != null && !string.IsNullOrEmpty(tH.name) && tH.name != tH.tid)
+                            {
+                                displayNameH = $"{hoveredIdForPanel} ({tH.name})";
+                            }
+                        }
+                        EditorGUILayout.LabelField(displayNameH, EditorStyles.boldLabel);
+                    }
+                    else
+                    {
+                        // Draw blank color chip to maintain consistent layout
+                        Rect blankRectH = GUILayoutUtility.GetRect(20, 20, GUILayout.Width(20));
+                        EditorGUI.DrawRect(blankRectH, new Color(0.3f, 0.3f, 0.3f, 0.2f));
+                        EditorGUI.DrawRect(blankRectH, new Color(0, 0, 0, 0.2f));
+                        EditorGUILayout.LabelField("None", EditorStyles.boldLabel);
+                    }
+                    EditorGUILayout.EndHorizontal();
+
+                    EditorGUILayout.Space(2);
+
+                    // Painting with (selected brush) with color chip
+                    EditorGUILayout.BeginHorizontal();
+                    EditorGUILayout.LabelField("Painting with:", GUILayout.Width(100));
                     
                     if (!string.IsNullOrEmpty(selectedBrushTerrain))
                     {
@@ -788,6 +832,10 @@ namespace Editor
                     }
                     else
                     {
+                        // Draw blank color chip to maintain consistent layout
+                        Rect blankRect = GUILayoutUtility.GetRect(20, 20, GUILayout.Width(20));
+                        EditorGUI.DrawRect(blankRect, new Color(0.3f, 0.3f, 0.3f, 0.2f));
+                        EditorGUI.DrawRect(blankRect, new Color(0, 0, 0, 0.2f));
                         EditorGUILayout.LabelField("None", EditorStyles.boldLabel);
                     }
                     EditorGUILayout.EndHorizontal();
@@ -1395,35 +1443,25 @@ namespace Editor
                     Handles.EndGUI();
                 }
                 
-                // Draw hover label over the hovered tile
-                if (showHoverLabel)
+                // Draw hover label over the hovered tile (disabled during paint mode)
+                if (showHoverLabel && !paintMode)
                 {
                     float hoverX = startX + hoveredTile.x * TILE_SIZE + TILE_SIZE * 0.5f;
                     float hoverZ = startZ + hoveredTile.y * TILE_SIZE + TILE_SIZE * 0.5f;
                     Vector3 hoverPos = new Vector3(hoverX, y, hoverZ);
+                    // Normal hover label
+                    string hoverDisplayText = GetTerrainDisplayText(hoveredTerrainId);
                     
-                    // In paint mode, show Current/Paint as info above brush
-                    if (paintMode)
-                    {
-                        // Always show paint mode tooltip
-                        DrawPaintModeHoverLabel(hoverPos, hoveredTerrainId, s_LabelStyle, hoveredTile, width, height, startX, startZ, y, cameraDistance);
-                    }
-                    else
-                    {
-                        // Normal hover label
-                        string hoverDisplayText = GetTerrainDisplayText(hoveredTerrainId);
-                        
-                        Color hoverLabelColor = ResolveHoverLabelColor(hoveredTerrainId);
-                        
-                        // Reuse hover style
-                        GUIStyle hoverStyle = s_LabelStyleHover;
-                        hoverStyle.normal.textColor = hoverLabelColor;
-                        
-                        // Batch begin for single hover label
-                        Handles.BeginGUI();
-                        DrawLabelWithColoredIcon(hoverPos, hoverDisplayText, hoveredTerrainId, hoverStyle, hoverLabelColor);
-                        Handles.EndGUI();
-                    }
+                    Color hoverLabelColor = ResolveHoverLabelColor(hoveredTerrainId);
+                    
+                    // Reuse hover style
+                    GUIStyle hoverStyle = s_LabelStyleHover;
+                    hoverStyle.normal.textColor = hoverLabelColor;
+                    
+                    // Batch begin for single hover label
+                    Handles.BeginGUI();
+                    DrawLabelWithColoredIcon(hoverPos, hoverDisplayText, hoveredTerrainId, hoverStyle, hoverLabelColor);
+                    Handles.EndGUI();
                 }
             }
             
@@ -1550,6 +1588,11 @@ namespace Editor
             {
                 cachedHoverRegion = null;
                 SceneView.RepaintAll();
+                // Force the inspector window to repaint to update the hover information
+                if (instance != null)
+                {
+                    instance.Repaint();
+                }
             }
         }
 
@@ -1602,233 +1645,6 @@ namespace Editor
             }
         }
         
-        private static void DrawPaintModeHoverLabel(Vector3 position, string currentTerrainId, GUIStyle baseStyle, Vector2Int hoveredTile, int width, int height, float startX, float startZ, float y, float cameraDistance)
-        {
-            // Highlighting is handled in OnSceneGUI for unified fade behavior
-            
-            Handles.BeginGUI();
-            
-            bool isSampling = IsSamplingModifier(Event.current);
-            bool isSameTerrain = !string.IsNullOrEmpty(currentTerrainId) && currentTerrainId == selectedBrushTerrain;
-            
-            // Get camera information
-            Camera sceneCamera = SceneView.currentDrawingSceneView.camera;
-            Vector3 cameraPos = sceneCamera.transform.position;
-            
-            // Calculate brush bounds
-            int halfSize = (brushSize - 1) / 2;
-            
-            // Find the top edge of the brush area from camera's perspective
-            // We'll place the tooltip as if there was a tile above the top row
-            float brushTopZ = startZ + (hoveredTile.y + halfSize + 1) * TILE_SIZE;
-            float brushBottomZ = startZ + (hoveredTile.y - halfSize) * TILE_SIZE;
-            float brushCenterX = position.x;
-            
-            // Create test points at the top and bottom edges of the brush
-            Vector3 topEdgePoint = new Vector3(brushCenterX, y, brushTopZ);
-            Vector3 bottomEdgePoint = new Vector3(brushCenterX, y, brushBottomZ);
-            
-            // Convert to screen space to see which is visually "higher"
-            Vector2 topScreenPos = HandleUtility.WorldToGUIPoint(topEdgePoint);
-            Vector2 bottomScreenPos = HandleUtility.WorldToGUIPoint(bottomEdgePoint);
-            
-            // Choose the edge that appears higher on screen (lower Y value in GUI space)
-            Vector3 tooltipBasePos;
-            if (topScreenPos.y < bottomScreenPos.y)
-            {
-                // Top edge is visually higher - place tooltip above it
-                tooltipBasePos = new Vector3(brushCenterX, y, brushTopZ + TILE_SIZE * 0.5f);
-            }
-            else
-            {
-                // Bottom edge is visually higher (camera is rotated) - place tooltip above it
-                tooltipBasePos = new Vector3(brushCenterX, y, brushBottomZ - TILE_SIZE * 0.5f);
-            }
-            
-            // Calculate clearance based on camera mode and distance
-            bool isOrthographic = sceneCamera.orthographic;
-            float baseClearance = TILE_SIZE; // Base clearance of one tile height
-            float clearanceMultiplier;
-            
-            if (isOrthographic)
-            {
-                // In orthographic mode, scale based on orthographic size
-                float orthoSize = sceneCamera.orthographicSize;
-                clearanceMultiplier = Mathf.Clamp(orthoSize / 20f, 0.5f, 2.5f);
-            }
-            else
-            {
-                // In perspective mode, scale based on camera distance
-                // Close up: less clearance needed (tiles appear larger)
-                // Far away: more clearance needed (tiles appear smaller)
-                clearanceMultiplier = Mathf.Clamp(cameraDistance / 50f, 0.5f, 2.5f);
-                
-                // Also consider the camera's field of view
-                float fovMultiplier = sceneCamera.fieldOfView / 60f; // 60 is typical FOV
-                clearanceMultiplier *= Mathf.Clamp(fovMultiplier, 0.8f, 1.2f);
-            }
-            
-            // Calculate the tooltip height with dynamic clearance
-            float tooltipHeight = y + baseClearance * clearanceMultiplier;
-            
-            // For perspective cameras, use ray-based positioning
-            Vector3 tooltipWorldPos;
-            if (!isOrthographic)
-            {
-                // Cast a ray from the camera through the desired tooltip position
-                Vector3 dirToTooltip = (tooltipBasePos - cameraPos).normalized;
-                
-                // Calculate the final position along the ray at the desired height
-                float t = (tooltipHeight - cameraPos.y) / dirToTooltip.y;
-                
-                if (Mathf.Abs(dirToTooltip.y) > 0.01f && t > 0)
-                {
-                    // Calculate position along ray at the target height
-                    tooltipWorldPos = cameraPos + dirToTooltip * t;
-                    
-                    // Adjust X and Z to stay centered above the brush
-                    tooltipWorldPos.x = tooltipBasePos.x;
-                    tooltipWorldPos.z = tooltipBasePos.z;
-                }
-                else
-                {
-                    // Fallback if ray is nearly horizontal or pointing wrong direction
-                    tooltipWorldPos = tooltipBasePos;
-                    tooltipWorldPos.y = tooltipHeight;
-                }
-            }
-            else
-            {
-                // For orthographic cameras, simply offset vertically
-                tooltipWorldPos = tooltipBasePos;
-                tooltipWorldPos.y = tooltipHeight;
-            }
-            
-            // Convert world position to GUI position
-            Vector2 guiPos = HandleUtility.WorldToGUIPoint(tooltipWorldPos);
-            
-            // Create style for the paint mode label (reuse hover style baseline)
-            GUIStyle style = s_LabelStyleHover ?? new GUIStyle(baseStyle);
-            style.fontSize = Mathf.RoundToInt(12 * textSize);
-            style.alignment = TextAnchor.MiddleLeft;
-            style.fontStyle = FontStyle.Bold;
-            
-            // Build label content and colors
-            List<(string text, Color? chipColor, Color textColor)> labels = new List<(string, Color?, Color)>();
-            
-            if (isSampling)
-            {
-                labels.Add(("Click to sample", null, Color.cyan));
-            }
-            else if (isSameTerrain)
-            {
-                string terrainDisplay = GetTerrainDisplayText(currentTerrainId);
-                terrainDisplay = terrainDisplay.Replace("\n", " / ");
-                Color terrainColor = terrainDatabase?.GetTerrainColor(currentTerrainId, Color.gray) ?? Color.gray;
-                labels.Add(($"Already {terrainDisplay}", terrainColor, new Color(0.7f, 0.7f, 0.7f, 1f)));
-            }
-            else
-            {
-                // Current terrain
-                if (!string.IsNullOrEmpty(currentTerrainId))
-                {
-                    string currentDisplay = GetTerrainDisplayText(currentTerrainId);
-                    currentDisplay = currentDisplay.Replace("\n", " / ");
-                    Color currentColor = terrainDatabase?.GetTerrainColor(currentTerrainId, Color.gray) ?? Color.gray;
-                    labels.Add(($"Current tile: {currentDisplay}", currentColor, new Color(0.9f, 0.9f, 0.9f, 1f)));
-                }
-                
-                // Paint as terrain
-                if (!string.IsNullOrEmpty(selectedBrushTerrain))
-                {
-                    string paintDisplay = GetTerrainDisplayText(selectedBrushTerrain);
-                    paintDisplay = paintDisplay.Replace("\n", " / ");
-                    Color paintColor = terrainDatabase?.GetTerrainColor(selectedBrushTerrain, Color.gray) ?? Color.gray;
-                    labels.Add(($"Brush: {paintDisplay}", paintColor, Color.white));
-                }
-                else
-                {
-                    labels.Add(("No terrain selected", null, new Color(0.6f, 0.6f, 0.6f, 1f)));
-                }
-            }
-            
-            // Calculate total size needed
-            float maxWidth = 0;
-            float totalHeight = 0;
-            float lineHeight = 18f;
-            float chipSize = 10f;
-            float chipPadding = 4f;
-            float padding = 6f;
-            
-            foreach (var label in labels)
-            {
-                GUIContent content = new GUIContent(label.text);
-                Vector2 textSize = style.CalcSize(content);
-                float labelWidth = textSize.x;
-                if (label.chipColor.HasValue)
-                    labelWidth += chipSize + chipPadding;
-                maxWidth = Mathf.Max(maxWidth, labelWidth);
-                totalHeight += lineHeight;
-            }
-            
-            // Draw subtle background box
-            Rect bgRect = new Rect(
-                guiPos.x - maxWidth / 2 - padding,
-                guiPos.y - totalHeight / 2 - padding,
-                maxWidth + padding * 2,
-                totalHeight + padding * 2
-            );
-            // Clamp tooltip box to SceneView viewport
-            var svClamp = SceneView.currentDrawingSceneView;
-            if (svClamp != null)
-            {
-                float vw = svClamp.position.width;
-                float vh = svClamp.position.height;
-                float pad2 = 8f;
-                bgRect.x = Mathf.Clamp(bgRect.x, pad2, vw - bgRect.width - pad2);
-                bgRect.y = Mathf.Clamp(bgRect.y, pad2, vh - bgRect.height - pad2);
-            }
-            
-            // Semi-transparent background
-            Color bgColor = new Color(0.1f, 0.1f, 0.1f, 0.85f);
-            EditorGUI.DrawRect(bgRect, bgColor);
-            
-            // Subtle border
-            Handles.BeginGUI();
-            Color borderColor = new Color(0.3f, 0.3f, 0.3f, 0.5f);
-            Handles.DrawSolidRectangleWithOutline(new Vector3[] {
-                new Vector3(bgRect.x, bgRect.y, 0),
-                new Vector3(bgRect.x + bgRect.width, bgRect.y, 0),
-                new Vector3(bgRect.x + bgRect.width, bgRect.y + bgRect.height, 0),
-                new Vector3(bgRect.x, bgRect.y + bgRect.height, 0)
-            }, Color.clear, borderColor);
-            
-            // Draw labels
-            float yOffset = bgRect.y + padding;
-            foreach (var label in labels)
-            {
-                float xPos = bgRect.x + padding;
-                
-                // Draw color chip if provided
-                if (label.chipColor.HasValue)
-                {
-                    Rect chipRect = new Rect(xPos, yOffset + (lineHeight - chipSize) / 2, chipSize, chipSize);
-                    EditorGUI.DrawRect(chipRect, label.chipColor.Value);
-                    EditorGUI.DrawRect(chipRect, new Color(0, 0, 0, 0.3f)); // Border
-                    xPos += chipSize + chipPadding;
-                }
-                
-                // Draw text
-                style.normal.textColor = label.textColor;
-                GUIContent content = new GUIContent(label.text);
-                Vector2 textSize = style.CalcSize(content);
-                GUI.Label(new Rect(xPos, yOffset, textSize.x, lineHeight), label.text, style);
-                
-                yOffset += lineHeight;
-            }
-            
-            Handles.EndGUI();
-        }
         
         private static HashSet<Vector2Int> FindAdjacentIsland(Vector2Int centerTile, string targetTerrain, int width, int height)
         {
