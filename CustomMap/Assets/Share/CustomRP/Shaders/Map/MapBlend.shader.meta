@@ -1,10 +1,10 @@
 fileFormatVersion: 2
 guid: c2d737676f32a3a4bbc9cd2e4bc3629e
-timeCreated: 1705960833
-licenseType: Free
-NativeFormatImporter:
+ShaderImporter:
   externalObjects: {}
-  mainObjectFileID: 4800000
-  userData:
-  assetBundleName: b5889701ebd1a5a0777a9c0cbb282065.bundle
-  assetBundleVariant:
+  defaultTextures: []
+  nonModifiableTextures: []
+  preprocessorOverride: 0
+  userData: '{"shaderPath":"CustomRP/Map/MapBlend","attributes":[{"isBaseTexture":false,"channel":4,"index":0,"range":{"x":0.0,"y":1.0},"propertyTarget":"_AlbedoMap0","mask":0},{"isBaseTexture":false,"channel":4,"index":1,"range":{"x":0.0,"y":1.0},"propertyTarget":"_AlbedoMap1","mask":0},{"isBaseTexture":false,"channel":4,"index":2,"range":{"x":0.0,"y":1.0},"propertyTarget":"_AlbedoMap2","mask":0},{"isBaseTexture":false,"channel":4,"index":3,"range":{"x":0.0,"y":1.0},"propertyTarget":"_AlbedoMap3","mask":0},{"isBaseTexture":false,"channel":4,"index":0,"range":{"x":1.0,"y":0.0},"propertyTarget":"_AlbedoMap4","mask":0}]}'
+  assetBundleName: 
+  assetBundleVariant: 

@@ -7,6 +7,12 @@
       "dependencies": {},
       "url": "https://packages.unity.com"
     },
+    "com.cyanilux.bakeshader": {
+      "version": "file:/Users/doge/workspace/BakeShader",
+      "depth": 0,
+      "source": "local",
+      "dependencies": {}
+    },
     "com.divinedragon.builder": {
       "version": "https://github.com/DivineDragonFanClub/divine-builder.git",
       "depth": 0,
@@ -93,6 +99,14 @@
       "dependencies": {},
       "url": "https://packages.unity.com"
     },
+    "com.unity.polybrush": {
+      "version": "file:/Users/doge/workspace/com.unity.polybrush",
+      "depth": 0,
+      "source": "local",
+      "dependencies": {
+        "com.unity.settings-manager": "1.0.3"
+      }
+    },
     "com.unity.render-pipelines.core": {
       "version": "10.6.0",
       "depth": 1,
@@ -123,6 +137,13 @@
     "com.unity.searcher": {
       "version": "4.3.2",
       "depth": 2,
+      "source": "registry",
+      "dependencies": {},
+      "url": "https://packages.unity.com"
+    },
+    "com.unity.settings-manager": {
+      "version": "1.0.3",
+      "depth": 1,
       "source": "registry",
       "dependencies": {},
       "url": "https://packages.unity.com"
