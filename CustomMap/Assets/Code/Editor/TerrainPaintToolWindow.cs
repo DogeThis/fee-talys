@@ -174,6 +174,8 @@ namespace Editor
         private static MapTerrain lastCachedTerrain = null;
         private static float lastIslandCameraDistance = -1f;
         private static float lastFrameTime = 0f;
+        // Smoothed zoom metric (px/tile) to stabilize LOD while zooming
+        private static float smoothedPixelsPerTile = -1f;
         
         // Camera movement detection
         private static Vector3 lastCameraPosition;
@@ -231,6 +233,7 @@ namespace Editor
         private const string PREFS_CULL_ENABLED = PREFS_PREFIX + "CullEnabled";
         private const string PREFS_CULL_MIN_SEP = PREFS_PREFIX + "CullMinSep";
         private const string PREFS_HIGHLIGHT_TINT = PREFS_PREFIX + "HighlightTint";
+        private const string PREFS_LOD_CROSSFADE = PREFS_PREFIX + "LodCrossfade";
         
         private Vector2 scrollPosition;
         private List<MapTerrain> availableTerrains = new List<MapTerrain>();
@@ -358,6 +361,7 @@ namespace Editor
         // Per-session caches
         private static readonly Dictionary<string, Color> terrainColorCache = new Dictionary<string, Color>();
         private static GUIContent s_LabelContent = new GUIContent();
+        private static System.Collections.Generic.Dictionary<string,float> labelAlphaStates = new System.Collections.Generic.Dictionary<string,float>();
         
         private void OnDisable()
         {
@@ -390,6 +394,7 @@ namespace Editor
             cullingEnabled = EditorPrefs.GetBool(PREFS_CULL_ENABLED, true);
             cullingMinSeparation = EditorPrefs.GetFloat(PREFS_CULL_MIN_SEP, 16f);
             highlightTint = EditorPrefs.GetBool(PREFS_HIGHLIGHT_TINT, true);
+            lodCrossfadeBandPx = EditorPrefs.GetFloat(PREFS_LOD_CROSSFADE, 8f);
             
             string colorStr = EditorPrefs.GetString(PREFS_TEXT_COLOR, ColorUtility.ToHtmlStringRGBA(Color.white));
             ColorUtility.TryParseHtmlString("#" + colorStr, out textColor);
@@ -427,6 +432,7 @@ namespace Editor
             EditorPrefs.SetBool(PREFS_CULL_ENABLED, cullingEnabled);
             EditorPrefs.SetFloat(PREFS_CULL_MIN_SEP, cullingMinSeparation);
             EditorPrefs.SetBool(PREFS_HIGHLIGHT_TINT, highlightTint);
+            EditorPrefs.SetFloat(PREFS_LOD_CROSSFADE, lodCrossfadeBandPx);
             EditorPrefs.SetString(PREFS_TEXT_COLOR, ColorUtility.ToHtmlStringRGBA(textColor));
             EditorPrefs.SetString(PREFS_GRID_COLOR, ColorUtility.ToHtmlStringRGBA(gridColor));
             EditorPrefs.SetFloat(PREFS_WORLD_OFFSET + "_X", worldOffset.x);
@@ -594,6 +600,7 @@ namespace Editor
                     lodSmallTextThreshold = EditorGUILayout.FloatField("Small Text Threshold (px/tile)", lodSmallTextThreshold);
                     lodChipOnlyThreshold = EditorGUILayout.FloatField("Chip-only Threshold (px/tile)", lodChipOnlyThreshold);
                     lodSmallTextScale = EditorGUILayout.Slider("Small Text Scale", lodSmallTextScale, 0.5f, 1.0f);
+                    lodCrossfadeBandPx = EditorGUILayout.Slider("LOD Crossfade Band (px/tile)", lodCrossfadeBandPx, 0f, 10f);
                 }
                 EditorGUI.indentLevel--;
                 cullingEnabled = EditorGUILayout.Toggle("Enable Screen Culling", cullingEnabled);
@@ -1014,10 +1021,57 @@ namespace Editor
             
             // Compute zoom metric for LOD
             float pixelsPerTileGlobal = GetPixelsPerTile(sceneView, startX, startZ, y, width, height);
-            LabelDetail detailGlobal = GetDetailForZoom(pixelsPerTileGlobal);
+            // Low-pass filter px/tile to dampen flicker during zoom
+            {
+                float t = 1f - Mathf.Exp(-6f * deltaTime); // frame-rate independent smoothing
+                if (smoothedPixelsPerTile < 0f) smoothedPixelsPerTile = pixelsPerTileGlobal;
+                smoothedPixelsPerTile = Mathf.Lerp(smoothedPixelsPerTile, pixelsPerTileGlobal, Mathf.Clamp01(t));
+            }
+            LabelDetail detailGlobal = GetDetailForZoom(smoothedPixelsPerTile);
+            // Compute crossfade alphas for LOD around chip threshold
+            if (lodEnabled && lodCrossfadeBandPx > 0f)
+            {
+                float center = lodChipOnlyThreshold;
+                float band = lodCrossfadeBandPx;
+                if (smoothedPixelsPerTile <= center - band)
+                {
+                    lodChipAlphaScale = 1f; lodLabelAlphaScale = 0f;
+                }
+                else if (smoothedPixelsPerTile >= center + band)
+                {
+                    lodChipAlphaScale = 0f; lodLabelAlphaScale = 1f;
+                }
+                else
+                {
+                    float t = Mathf.InverseLerp(center - band, center + band, smoothedPixelsPerTile);
+                    lodLabelAlphaScale = t; lodChipAlphaScale = 1f - t;
+                }
+            }
+            else
+            {
+                // Default alphas per resolved detail
+                lodChipAlphaScale = (detailGlobal == LabelDetail.ChipOnly) ? 1f : 0f;
+                lodLabelAlphaScale = (detailGlobal == LabelDetail.ChipOnly) ? 0f : 1f;
+            }
+            bool lodCrossFading = lodEnabled && lodCrossfadeBandPx > 0f && lodLabelAlphaScale > 0f && lodLabelAlphaScale < 1f;
+
+            // So labels don't pop when zooming toward chip-only, gradually relax min separation
+            float effectiveMinSeparation = cullingMinSeparation;
+            if (lodEnabled)
+            {
+                float center = lodChipOnlyThreshold;
+                float band = Mathf.Max(1f, lodCrossfadeBandPx);
+                // Start shrinking separation earlier and go lower to prevent pop
+                float start = center + band * 4f; // earlier padding
+                float end = center - band * 0.5f; // extend slightly into the band
+                float tShrink = Mathf.Clamp01(Mathf.InverseLerp(start, end, pixelsPerTileGlobal));
+                // Down to 15% of configured separation near the transition
+                effectiveMinSeparation = Mathf.Lerp(cullingMinSeparation, max1(cullingMinSeparation * 0.15f), tShrink);
+            }
 
             // Draw labels or chips. In ColorOnly, allow chips when LOD == ChipOnly.
-            bool allowAnyLabels = displayMode != DisplayMode.ColorOnly || (lodEnabled && detailGlobal == LabelDetail.ChipOnly);
+            // Always run the label pass when crossfading, even in ColorOnly (so chips can render during blend)
+            bool allowAnyLabels = displayMode != DisplayMode.ColorOnly || (lodEnabled && (lodLabelAlphaScale > 0f || lodChipAlphaScale > 0f));
             if (isRepaint && allowAnyLabels)
             {
                 // Prepare reusable styles for this frame
@@ -1096,24 +1150,48 @@ namespace Editor
                             Color labelColor = ResolveLabelColorForTile(island.terrainId);
                             
                             bool isHoveredIsland = showHoverLabel && island.tiles.Contains(hoveredTile);
-                            if (detail == LabelDetail.ChipOnly && !isHoveredIsland)
-                            {
-                                Rect chipRect = CalcChipRect(worldPos);
-                                if (!cullingEnabled || !OverlapsGrid(cullGrid, chipRect, cullingMinSeparation))
-                                {
-                                    DrawColorChip(worldPos, island.terrainId);
-                                }
-                                continue;
-                            }
-                            else
+                            bool wantText = (displayMode != DisplayMode.ColorOnly) && lodLabelAlphaScale > 0f;
+                            bool wantChip = (displayMode != DisplayMode.TextOnly) && lodChipAlphaScale > 0f;
+
+                            // Draw text first (so chip can blend behind during crossfade)
+                            if (wantText)
                             {
                                 GUIStyle styleRef = (detail == LabelDetail.SmallText) ? s_LabelStyleSmall : s_LabelStyle;
                                 styleRef.normal.textColor = labelColor;
+                                // Compute rect for overlap attenuation
                                 Rect rect = CalcLabelRect(worldPos, displayText, styleRef);
-                                if (!cullingEnabled || !OverlapsGrid(cullGrid, rect, cullingMinSeparation))
+                                // Overlap attenuation factor based on grid occupancy (soft, not a gate)
+                                float overlapAlpha = 1f;
                                 {
-                                    DrawLabelWithColoredIcon(worldPos, displayText, island.terrainId, styleRef, labelColor);
+                                    float occ = cameraIsMoving ? 0f : OverlapRatio(cullGrid, rect, effectiveMinSeparation);
+                                    // Map occlusion to alpha (higher occlusion -> lower alpha), keep small floor so it can still LOD-fade
+                                    overlapAlpha = Mathf.Clamp01(1f - occ * 1.2f);
+                                    if (isHoveredIsland) overlapAlpha = 1f; // keep hovered strong
                                 }
+                                // Stateful per-label smoothing
+                                string k = island.terrainId + "|" + Mathf.RoundToInt(labelPos.x) + "x" + Mathf.RoundToInt(labelPos.y);
+                                float prev = 0f; labelAlphaStates.TryGetValue(k, out prev);
+                                float target = overlapAlpha;
+                                if (cameraIsMoving) target = Mathf.Max(prev, target); // don't decrease while moving
+                                float dt = Mathf.Min(0.1f, (float)EditorApplication.timeSinceStartup - lastFrameTime);
+                                float newAlpha = Mathf.MoveTowards(prev, target, 10f * dt);
+                                labelAlphaStates[k] = newAlpha;
+                                if (newAlpha > 0.02f)
+                                {
+                                    DrawLabelWithColoredIcon(worldPos, displayText, island.terrainId, styleRef, labelColor, newAlpha);
+                                    // Only contribute to occupancy when significantly visible and not crossfading
+                                    if (newAlpha >= 0.5f && cullingEnabled && !lodCrossFading && !cameraIsMoving)
+                                    {
+                                        OverlapsGrid(cullGrid, rect, effectiveMinSeparation);
+                                    }
+                                }
+                            }
+                            // Draw chip too if requested (skip on hovered to avoid clutter)
+                            if (wantChip && !isHoveredIsland)
+                            {
+                                Rect chipRect = CalcChipRect(worldPos);
+                                if (cullingEnabled) OverlapsGrid(cullGrid, chipRect, cullingMinSeparation); // register occupancy only
+                                DrawColorChip(worldPos, island.terrainId);
                             }
                         }
                     }
@@ -1988,7 +2066,7 @@ namespace Editor
             }
         }
         
-        private static void DrawLabelWithColoredIcon(Vector3 position, string text, string terrainId, GUIStyle textStyle, Color textColor)
+        private static void DrawLabelWithColoredIcon(Vector3 position, string text, string terrainId, GUIStyle textStyle, Color textColor, float extraAlpha = 1f)
         {
             // Convert world position to GUI position
             Vector2 guiPos = HandleUtility.WorldToGUIPoint(position);
@@ -2005,27 +2083,32 @@ namespace Editor
             // Position for the whole label (centered)
             Rect labelRect = new Rect(guiPos.x - totalWidth / 2, guiPos.y - textSize.y / 2, totalWidth, textSize.y);
 
-            // Only render labels when the tile is on-screen; if on-screen, clamp rect inside view
+            // Clamp into view and compute an anchor-based edge fade (so labels fade out as anchor leaves)
+            float alphaMul = 1f;
             var sv = SceneView.currentDrawingSceneView;
             if (sv != null)
             {
                 float viewW = sv.position.width;
                 float viewH = sv.position.height;
-                bool tileOnScreen = guiPos.x >= 0 && guiPos.x <= viewW && guiPos.y >= 0 && guiPos.y <= viewH;
-                if (!tileOnScreen)
-                {
-                    return; // Off-screen: do not draw the label
-                }
                 float pad = 8f;
+                // Distance of anchor from viewport (0 if inside)
+                float dx = (guiPos.x < 0) ? -guiPos.x : (guiPos.x > viewW ? guiPos.x - viewW : 0f);
+                float dy = (guiPos.y < 0) ? -guiPos.y : (guiPos.y > viewH ? guiPos.y - viewH : 0f);
+                float d = Mathf.Max(dx, dy);
+                float band = 24f;
+                alphaMul = Mathf.Clamp01(1f - d / band);
+                // Clamp label rect to stay readable while fading
                 labelRect.x = Mathf.Clamp(labelRect.x, pad, viewW - labelRect.width - pad);
                 labelRect.y = Mathf.Clamp(labelRect.y, pad, viewH - labelRect.height - pad);
+                // If fully outside beyond band, skip
+                if (alphaMul <= 0.001f) return;
             }
             
             // Always draw an outline for better readability
             // Draw multiple outline passes for stronger effect
             GUIStyle outlineStyle = new GUIStyle(textStyle);
             Color outlineColor = (textColor == Color.black) ? Color.white : Color.black;
-            outlineStyle.normal.textColor = new Color(outlineColor.r, outlineColor.g, outlineColor.b, 0.8f);
+            outlineStyle.normal.textColor = new Color(outlineColor.r, outlineColor.g, outlineColor.b, 0.8f * alphaMul * lodLabelAlphaScale * extraAlpha);
             
             // Draw outline in 8 directions for better coverage
             Vector2[] outlineOffsets = new Vector2[]
@@ -2066,10 +2149,12 @@ namespace Editor
                     labelRect.y + (labelRect.height - iconSize) / 2, iconSize, iconSize);
                 
                 // Draw icon background
-                EditorGUI.DrawRect(iconRect, terrainColor);
+                Color iconFill = terrainColor; iconFill.a *= (alphaMul * lodLabelAlphaScale * extraAlpha);
+                EditorGUI.DrawRect(iconRect, iconFill);
                 
                 // Draw icon border for clarity
                 Color borderColor = (textColor == Color.black) ? Color.black : Color.white;
+                borderColor.a *= (alphaMul * lodLabelAlphaScale * extraAlpha);
                 Handles.DrawBezier(
                     new Vector3(iconRect.x, iconRect.y, 0),
                     new Vector3(iconRect.x + iconSize, iconRect.y, 0),
@@ -2080,7 +2165,7 @@ namespace Editor
             }
             
             // Draw the text on top
-            textStyle.normal.textColor = textColor;
+            textStyle.normal.textColor = new Color(textColor.r, textColor.g, textColor.b, textColor.a * alphaMul * lodLabelAlphaScale * extraAlpha);
             Rect textRect = new Rect(labelRect.x + iconSize + iconPadding * 2, labelRect.y, 
                 textSize.x, labelRect.height);
             GUI.Label(textRect, s_LabelContent, textStyle);
@@ -2327,6 +2412,11 @@ namespace Editor
         private static bool cullingEnabled = true;
         private static float cullingMinSeparation = 16f;
         private static bool highlightTint = true;
+        private static float lodCrossfadeBandPx = 4f; // px/tile band to crossfade text<->chips
+
+        // LOD alpha scales applied inside draw helpers
+        private static float lodLabelAlphaScale = 1f;
+        private static float lodChipAlphaScale = 1f;
 
         // Reusable GUI styles
         private static GUIStyle s_LabelStyle;
@@ -2387,6 +2477,45 @@ namespace Editor
         return false;
     }
 
+    // Estimate overlap ratio of a rect against current grid entries
+    private static float OverlapRatio(System.Collections.Generic.Dictionary<(int,int), System.Collections.Generic.List<UnityEngine.Rect>> grid, UnityEngine.Rect rect, float minSeparation)
+    {
+        float cell = Mathf.Max(8f, minSeparation);
+        Rect r = InflateRect(rect, minSeparation * 0.5f);
+        int x0 = Mathf.FloorToInt(r.xMin / cell);
+        int y0 = Mathf.FloorToInt(r.yMin / cell);
+        int x1 = Mathf.FloorToInt(r.xMax / cell);
+        int y1 = Mathf.FloorToInt(r.yMax / cell);
+        float area = r.width * r.height;
+        if (area <= 0.0001f) return 0f;
+        float overlapArea = 0f;
+        for (int y = y0; y <= y1; y++)
+        {
+            for (int x = x0; x <= x1; x++)
+            {
+                var key = (x, y);
+                if (grid.TryGetValue(key, out var list))
+                {
+                    foreach (var other in list)
+                    {
+                        float ix0 = Mathf.Max(r.xMin, other.xMin);
+                        float iy0 = Mathf.Max(r.yMin, other.yMin);
+                        float ix1 = Mathf.Min(r.xMax, other.xMax);
+                        float iy1 = Mathf.Min(r.yMax, other.yMax);
+                        float iw = ix1 - ix0;
+                        float ih = iy1 - iy0;
+                        if (iw > 0 && ih > 0)
+                        {
+                            overlapArea += iw * ih;
+                        }
+                    }
+                }
+            }
+        }
+        return Mathf.Clamp01(overlapArea / area);
+    }
+
+
         private static Rect CalcLabelRect(Vector3 worldPos, string text, GUIStyle style)
         {
             Vector2 guiPos = HandleUtility.WorldToGUIPoint(worldPos);
@@ -2412,9 +2541,21 @@ namespace Editor
                                      guiPos.y - LABEL_ICON_SIZE / 2f,
                                      LABEL_ICON_SIZE,
                                      LABEL_ICON_SIZE);
-            // Draw chip background
-            EditorGUI.DrawRect(chipRect, terrainColor);
-            // Draw outline
+            // Use the same anchor-distance fade as labels
+            Rect viewport = SceneView.currentDrawingSceneView != null ? SceneView.currentDrawingSceneView.position : new Rect(0,0,Screen.width,Screen.height);
+            float vw = viewport.width;
+            float vh = viewport.height;
+            float dx = (guiPos.x < 0) ? -guiPos.x : (guiPos.x > vw ? guiPos.x - vw : 0f);
+            float dy = (guiPos.y < 0) ? -guiPos.y : (guiPos.y > vh ? guiPos.y - vh : 0f);
+            float d = Mathf.Max(dx, dy);
+            float band = 24f;
+            float alpha = Mathf.Clamp01(1f - d / band);
+            if (alpha <= 0.001f) return;
+
+            // Draw chip background with LOD crossfade alpha
+            Color fill = terrainColor; fill.a *= (alpha * lodChipAlphaScale);
+            EditorGUI.DrawRect(chipRect, fill);
+            // Draw outline with same fade
             Vector3[] verts = new Vector3[]
             {
                 new Vector3(chipRect.x, chipRect.y, 0),
@@ -2422,8 +2563,14 @@ namespace Editor
                 new Vector3(chipRect.x + chipRect.width, chipRect.y + chipRect.height, 0),
                 new Vector3(chipRect.x, chipRect.y + chipRect.height, 0)
             };
-            Handles.DrawSolidRectangleWithOutline(verts, Color.clear, Color.black);
+            Handles.DrawSolidRectangleWithOutline(verts, Color.clear, new Color(0f,0f,0f, alpha * lodChipAlphaScale));
         }
+
+        private static float min4(float a,float b,float c,float d)
+        {
+            return Mathf.Min(Mathf.Min(a,b), Mathf.Min(c,d));
+        }
+        private static float max1(float v) { return Mathf.Max(1f, v); }
     }
 
 }
