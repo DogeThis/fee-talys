@@ -1354,7 +1354,6 @@ namespace Editor
             Undo.IncrementCurrentGroup();
             Undo.SetCurrentGroupName("Paint Terrain");
             paintUndoGroup = Undo.GetCurrentGroup();
-            Undo.RecordObject(selectedTerrain, "Paint Terrain");
             paintedIndicesThisDrag.Clear();
             isPaintingStroke = true;
         }
@@ -1482,8 +1481,18 @@ namespace Editor
         private static void PaintTerrainDedup(Vector2Int centerTile, int width, int height)
         {
             if (string.IsNullOrEmpty(selectedBrushTerrain) || selectedTerrain == null) return;
+            
             int halfSize = (brushSize - 1) / 2;
             bool modified = false;
+            
+            // Record undo state for each paint operation during the stroke
+            // Unity needs a record for each modification to properly track array changes
+            if (isPaintingStroke)
+            {
+                Undo.RecordObject(selectedTerrain, "Paint Terrain");
+            }
+            
+            // Now actually paint
             for (int dx = -halfSize; dx <= halfSize; dx++)
             {
                 for (int dz = -halfSize; dz <= halfSize; dz++)
