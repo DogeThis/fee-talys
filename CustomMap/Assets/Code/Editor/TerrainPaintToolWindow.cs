@@ -1849,36 +1849,8 @@ namespace Editor
         {
             if (region.Count == 0) return;
             
-            // Create a subtle overlay; optionally tint by terrain color
-            Color highlightColor;
-            if (!string.IsNullOrEmpty(terrainId) && terrainDatabase != null)
-            {
-                Color baseColor = terrainDatabase.GetTerrainColor(terrainId, Color.gray);
-                highlightColor = new Color(baseColor.r, baseColor.g, baseColor.b, hoverHighlightMaxOpacity);
-            }
-            else
-            {
-                highlightColor = new Color(1f, 1f, 1f, hoverHighlightMaxOpacity);
-            }
-            
-            // Draw highlight overlay for each tile in the region
-            foreach (var tile in region)
-            {
-                float tileX = startX + tile.x * TILE_SIZE;
-                float tileZ = startZ + tile.y * TILE_SIZE;
-                
-                Vector3[] verts = new Vector3[]
-                {
-                    new Vector3(tileX, y + 0.02f, tileZ),
-                    new Vector3(tileX + TILE_SIZE, y + 0.02f, tileZ),
-                    new Vector3(tileX + TILE_SIZE, y + 0.02f, tileZ + TILE_SIZE),
-                    new Vector3(tileX, y + 0.02f, tileZ + TILE_SIZE)
-                };
-                
-                Handles.DrawSolidRectangleWithOutline(verts, highlightColor, Color.clear);
-            }
-            
-            // Draw a subtle border around the entire region with animated opacity
+            // Only draw borders - no tile overlay to reduce visual noise
+            // Build set of border edges
             HashSet<(Vector2Int, Vector2Int)> edges = new HashSet<(Vector2Int, Vector2Int)>();
             
             foreach (var tile in region)
@@ -1914,33 +1886,97 @@ namespace Editor
                 }
             }
             
-            // Draw the border edges with animated opacity
-            float borderOpacity = 0.3f;
-            Color borderColor = Color.white;
+            // Calculate colors based on terrain brightness for contrast
+            Color baseColor = Color.gray;
+            bool isDarkTerrain = false;
             if (!string.IsNullOrEmpty(terrainId) && terrainDatabase != null)
             {
-                Color baseColor = terrainDatabase.GetTerrainColor(terrainId, Color.gray);
-                borderColor = new Color(baseColor.r * 0.8f, baseColor.g * 0.8f, baseColor.b * 0.8f, borderOpacity);
+                baseColor = terrainDatabase.GetTerrainColor(terrainId, Color.gray);
+                // Calculate perceived brightness
+                float brightness = baseColor.r * 0.299f + baseColor.g * 0.587f + baseColor.b * 0.114f;
+                isDarkTerrain = brightness < 0.4f;
+            }
+            
+            // Draw multi-pass border with soft blur effect
+            // Contrasting base color (black for light terrains, white for dark terrains)
+            Color outlineColor = isDarkTerrain ? 
+                new Color(1f, 1f, 1f, 1f) :  // White for dark terrains
+                new Color(0f, 0f, 0f, 1f);    // Black for light terrains
+            
+            // Calculate the main border color
+            Color borderColor;
+            if (!string.IsNullOrEmpty(terrainId) && terrainDatabase != null)
+            {
+                // Use a brightened version of the terrain color
+                float boost = isDarkTerrain ? 1.5f : 1.2f;
+                borderColor = new Color(
+                    Mathf.Min(1f, baseColor.r * boost), 
+                    Mathf.Min(1f, baseColor.g * boost), 
+                    Mathf.Min(1f, baseColor.b * boost), 
+                    1f
+                );
             }
             else
             {
-                borderColor = new Color(1f, 1f, 1f, borderOpacity);
+                borderColor = new Color(1f, 1f, 1f, 1f);
             }
-            Handles.color = borderColor;
+            
+            // Draw multiple passes to create soft blur effect
+            // Outer glow (widest, most transparent)
+            Color glowColor = Color.Lerp(outlineColor, borderColor, 0.3f);
+            glowColor.a = 0.2f;
+            Handles.color = glowColor;
             foreach (var edge in edges)
             {
                 Vector3 start = new Vector3(
                     startX + edge.Item1.x * TILE_SIZE,
-                    y + 0.03f,
+                    y + 0.028f,
                     startZ + edge.Item1.y * TILE_SIZE
                 );
                 Vector3 end = new Vector3(
                     startX + edge.Item2.x * TILE_SIZE,
-                    y + 0.03f,
+                    y + 0.028f,
                     startZ + edge.Item2.y * TILE_SIZE
                 );
-                
+                Handles.DrawLine(start, end, 4f);
+            }
+            
+            // Middle layer (medium width, medium opacity)
+            Color midColor = Color.Lerp(outlineColor, borderColor, 0.5f);
+            midColor.a = 0.4f;
+            Handles.color = midColor;
+            foreach (var edge in edges)
+            {
+                Vector3 start = new Vector3(
+                    startX + edge.Item1.x * TILE_SIZE,
+                    y + 0.031f,
+                    startZ + edge.Item1.y * TILE_SIZE
+                );
+                Vector3 end = new Vector3(
+                    startX + edge.Item2.x * TILE_SIZE,
+                    y + 0.031f,
+                    startZ + edge.Item2.y * TILE_SIZE
+                );
                 Handles.DrawLine(start, end, 3f);
+            }
+            
+            // Core border (thinnest, most opaque)
+            Color coreColor = borderColor;
+            coreColor.a = 0.8f;
+            Handles.color = coreColor;
+            foreach (var edge in edges)
+            {
+                Vector3 start = new Vector3(
+                    startX + edge.Item1.x * TILE_SIZE,
+                    y + 0.034f,
+                    startZ + edge.Item1.y * TILE_SIZE
+                );
+                Vector3 end = new Vector3(
+                    startX + edge.Item2.x * TILE_SIZE,
+                    y + 0.034f,
+                    startZ + edge.Item2.y * TILE_SIZE
+                );
+                Handles.DrawLine(start, end, 2f);
             }
         }
         
