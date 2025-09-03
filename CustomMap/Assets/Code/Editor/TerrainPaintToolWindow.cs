@@ -8,7 +8,6 @@ namespace Editor
 {
     public enum DisplayMode
     {
-        TextOnly,
         ColorOnly,
         Both
     }
@@ -250,8 +249,6 @@ namespace Editor
         private const string PREFS_COLOR_BRIGHTNESS = PREFS_PREFIX + "ColorBrightness";
         private const string PREFS_AUTO_CONTRAST = PREFS_PREFIX + "AutoContrast";
         // Culling prefs
-        private const string PREFS_CULL_ENABLED = PREFS_PREFIX + "CullEnabled";
-        private const string PREFS_CULL_MIN_SEP = PREFS_PREFIX + "CullMinSep";
         private const string PREFS_HIGHLIGHT_TINT = PREFS_PREFIX + "HighlightTint";
         
         private Vector2 scrollPosition;
@@ -407,9 +404,6 @@ namespace Editor
             colorBrightness = EditorPrefs.GetFloat(PREFS_COLOR_BRIGHTNESS, 1.0f);
             autoContrastText = EditorPrefs.GetBool(PREFS_AUTO_CONTRAST, true);
             
-            // Culling
-            cullingEnabled = EditorPrefs.GetBool(PREFS_CULL_ENABLED, true);
-            cullingMinSeparation = EditorPrefs.GetFloat(PREFS_CULL_MIN_SEP, 16f);
             highlightTint = EditorPrefs.GetBool(PREFS_HIGHLIGHT_TINT, true);
             roundChips = EditorPrefs.GetBool(PREFS_PREFIX + "RoundChips", true);
             
@@ -453,9 +447,6 @@ namespace Editor
             EditorPrefs.SetFloat(PREFS_COLOR_OPACITY, colorOpacity);
             EditorPrefs.SetFloat(PREFS_COLOR_BRIGHTNESS, colorBrightness);
             EditorPrefs.SetBool(PREFS_AUTO_CONTRAST, autoContrastText);
-            // Culling
-            EditorPrefs.SetBool(PREFS_CULL_ENABLED, cullingEnabled);
-            EditorPrefs.SetFloat(PREFS_CULL_MIN_SEP, cullingMinSeparation);
             EditorPrefs.SetBool(PREFS_HIGHLIGHT_TINT, highlightTint);
             EditorPrefs.SetBool(PREFS_PREFIX + "RoundChips", roundChips);
             EditorPrefs.SetString(PREFS_TEXT_COLOR, ColorUtility.ToHtmlStringRGBA(textColor));
@@ -598,8 +589,7 @@ namespace Editor
                 
                 EditorGUILayout.LabelField("Display", EditorStyles.miniBoldLabel);
                 displayMode = (DisplayMode)EditorGUILayout.EnumPopup("Display Mode", displayMode);
-                // Label display is always Labels mode (text labels only)
-                if (displayMode != DisplayMode.TextOnly)
+                // Color settings are always shown
                 {
                     EditorGUILayout.LabelField("Tile Color Settings", EditorStyles.miniBoldLabel);
                     colorOpacity = EditorGUILayout.Slider("Tile Opacity", colorOpacity, 0.1f, 1f);
@@ -630,12 +620,6 @@ namespace Editor
                 }
 
                 EditorGUILayout.Space(5);
-                EditorGUILayout.LabelField("Screen Culling", EditorStyles.miniBoldLabel);
-                cullingEnabled = EditorGUILayout.Toggle("Enable Screen Culling", cullingEnabled);
-                if (cullingEnabled)
-                    cullingMinSeparation = EditorGUILayout.Slider("Min Separation (px)", cullingMinSeparation, 4f, 64f);
-
-                EditorGUILayout.Space(5);
                 EditorGUILayout.LabelField("Hover/Highlight", EditorStyles.miniBoldLabel);
                 hoverHighlightMaxOpacity = EditorGUILayout.Slider("Highlight Opacity", hoverHighlightMaxOpacity, 0.05f, 0.5f);
                 highlightTint = EditorGUILayout.Toggle("Tint Highlight", highlightTint);
@@ -654,8 +638,6 @@ namespace Editor
                     gridColor = new Color(1f, 1f, 1f, 0.3f);
                     gridThickness = 1f;
                     worldOffset = Vector3.zero;
-                    cullingEnabled = true;
-                    cullingMinSeparation = 16f;
                     SaveSettings();
                     SceneView.RepaintAll();
                 }
@@ -932,7 +914,7 @@ namespace Editor
             bool isRepaint = Event.current.type == EventType.Repaint;
 
             // Draw colored tiles if in color mode
-            if (isRepaint && displayMode != DisplayMode.TextOnly && terrainDatabase != null)
+            if (isRepaint && terrainDatabase != null)
             {
                 for (int row = 0; row < height; row++)
                 {
@@ -1116,7 +1098,6 @@ namespace Editor
                 
                 // Per-frame caches
                 var frameTextCache = new Dictionary<string, string>(64);
-                var cullGrid = new Dictionary<(int,int), List<Rect>>();
 
                 // Always use island grouping for labels
                 {
@@ -1152,7 +1133,7 @@ namespace Editor
 
                             Color labelColor = ResolveLabelColorForTile(island.terrainId);
                             bool wantText = (displayMode != DisplayMode.ColorOnly);
-                            bool wantChip = false; // No chips in Labels-only mode
+                            bool wantChip = false; // No chips, using text labels only
                             if (!wantText && !wantChip) continue;
 
                             // Compute GUI anchor and label size for layout
@@ -2388,8 +2369,6 @@ namespace Editor
             EditorGUILayout.EndHorizontal();
         }
 
-        private static bool cullingEnabled = true;
-        private static float cullingMinSeparation = 16f;
         private static bool highlightTint = true;
 
         // Reusable GUI styles
@@ -2398,106 +2377,10 @@ namespace Editor
         private static GUIStyle s_LabelStyleHover;
 
 
-        private static Rect InflateRect(Rect r, float padding)
-        {
-            return new Rect(r.x - padding, r.y - padding, r.width + padding * 2f, r.height + padding * 2f);
-        }
-
-    // Spatial hash culling grid to cut overlap checks
-    private static bool OverlapsGrid(Dictionary<(int,int), List<Rect>> grid, Rect candidate, float minSeparation)
-    {
-        float cell = Mathf.Max(8f, minSeparation);
-        Rect inflated = InflateRect(candidate, minSeparation * 0.5f);
-        int x0 = Mathf.FloorToInt(inflated.xMin / cell);
-        int y0 = Mathf.FloorToInt(inflated.yMin / cell);
-        int x1 = Mathf.FloorToInt(inflated.xMax / cell);
-        int y1 = Mathf.FloorToInt(inflated.yMax / cell);
-        for (int y = y0; y <= y1; y++)
-        {
-            for (int x = x0; x <= x1; x++)
-            {
-                var key = (x, y);
-                if (grid.TryGetValue(key, out var list))
-                {
-                    foreach (var r in list)
-                    {
-                        if (r.Overlaps(inflated)) return true;
-                    }
-                }
-            }
-        }
-        // No overlaps, insert into grid cells
-        for (int y = y0; y <= y1; y++)
-        {
-            for (int x = x0; x <= x1; x++)
-            {
-                var key = (x, y);
-                if (!grid.TryGetValue(key, out var list))
-                {
-                    list = new List<Rect>(4);
-                    grid[key] = list;
-                }
-                list.Add(inflated);
-            }
-        }
-        return false;
-    }
-
-    // Estimate overlap ratio of a rect against current grid entries
-    private static float OverlapRatio(System.Collections.Generic.Dictionary<(int,int), System.Collections.Generic.List<UnityEngine.Rect>> grid, UnityEngine.Rect rect, float minSeparation)
-    {
-        float cell = Mathf.Max(8f, minSeparation);
-        Rect r = InflateRect(rect, minSeparation * 0.5f);
-        int x0 = Mathf.FloorToInt(r.xMin / cell);
-        int y0 = Mathf.FloorToInt(r.yMin / cell);
-        int x1 = Mathf.FloorToInt(r.xMax / cell);
-        int y1 = Mathf.FloorToInt(r.yMax / cell);
-        float area = r.width * r.height;
-        if (area <= 0.0001f) return 0f;
-        float overlapArea = 0f;
-        for (int y = y0; y <= y1; y++)
-        {
-            for (int x = x0; x <= x1; x++)
-            {
-                var key = (x, y);
-                if (grid.TryGetValue(key, out var list))
-                {
-                    foreach (var other in list)
-                    {
-                        float ix0 = Mathf.Max(r.xMin, other.xMin);
-                        float iy0 = Mathf.Max(r.yMin, other.yMin);
-                        float ix1 = Mathf.Min(r.xMax, other.xMax);
-                        float iy1 = Mathf.Min(r.yMax, other.yMax);
-                        float iw = ix1 - ix0;
-                        float ih = iy1 - iy0;
-                        if (iw > 0 && ih > 0)
-                        {
-                            overlapArea += iw * ih;
-                        }
-                    }
-                }
-            }
-        }
-        return Mathf.Clamp01(overlapArea / area);
-    }
 
 
-        private static Rect CalcLabelRect(Vector3 worldPos, string text, GUIStyle style)
-        {
-            Vector2 guiPos = HandleUtility.WorldToGUIPoint(worldPos);
-            s_LabelContent.text = text;
-            Vector2 size = style.CalcSize(s_LabelContent);
-            float totalWidth = size.x + LABEL_ICON_SIZE + LABEL_ICON_PADDING * 2f;
-            return new Rect(guiPos.x - totalWidth / 2f, guiPos.y - size.y / 2f, totalWidth, size.y);
-        }
 
-        private static Rect CalcChipRect(Vector3 worldPos)
-        {
-            Vector2 guiPos = HandleUtility.WorldToGUIPoint(worldPos);
-            float totalWidth = LABEL_ICON_SIZE + LABEL_ICON_PADDING * 2f;
-            float height = LABEL_ICON_SIZE;
-            return new Rect(guiPos.x - totalWidth / 2f, guiPos.y - height / 2f, totalWidth, height);
-        }
+
 
         private static void DrawColorChip(Vector3 worldPos, string terrainId)
         {
@@ -2547,11 +2430,6 @@ namespace Editor
             }
         }
 
-        private static float min4(float a,float b,float c,float d)
-        {
-            return Mathf.Min(Mathf.Min(a,b), Mathf.Min(c,d));
-        }
-        private static float max1(float v) { return Mathf.Max(1f, v); }
     }
 
 }
