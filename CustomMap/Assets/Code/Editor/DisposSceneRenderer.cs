@@ -6,19 +6,10 @@ namespace Editor
 {
     public class DisposSceneRenderer
     {
-        // Fallback visual when no icon is available
-        private static Texture2D _fallbackTex;
-        private static Sprite _fallbackSprite;
-
-        private Dictionary<DisposEntry, GameObject> unitObjects = new Dictionary<DisposEntry, GameObject>();
-        private Dictionary<DisposGroup, GameObject> groupObjects = new Dictionary<DisposGroup, GameObject>();
-        private Dictionary<DisposEntry, DisposTool.DisposUnitComponent> entryToComponent = new Dictionary<DisposEntry, DisposTool.DisposUnitComponent>();
-        // Legacy root container (unused in immediate-mode)
-        private GameObject rootContainer;
+        // Immediate-mode renderer has no persistent GameObjects
         private DisposDocument currentDocument;
         private Bridge.MapTerrain currentTerrain;
         private const float TILE_SIZE = 5.0f; // Match TerrainPaintToolWindow
-        private const float GROUND_LIFT = 0.15f; // lift above surfaces to avoid clipping
         private bool showGrid = true;
         private bool showLabels = true;
         private bool showDirections = true;
@@ -43,19 +34,11 @@ namespace Editor
         
         public void Initialize() { }
         
-        public void Cleanup()
-        {
-            ClearAllUnits();
-            ClearAllGroups();
-        }
+        public void Cleanup() { }
         
         public void RenderDocument(DisposDocument document, Bridge.MapTerrain terrain = null)
         {
-            if (document == null)
-            {
-                ClearAllUnits();
-                return;
-            }
+            if (document == null) return;
             
             currentDocument = document;
             if (terrain != null)
@@ -66,9 +49,6 @@ namespace Editor
         private void RefreshUnits()
         {
             Debug.Log($"RefreshUnits called. Document: {currentDocument != null}, Groups: {currentDocument?.Groups?.Count ?? 0}");
-            
-            ClearAllUnits();
-            ClearAllGroups();
             
             if (currentDocument == null)
             {
@@ -88,33 +68,7 @@ namespace Editor
         }
         
         private GameObject CreateGroupObject(DisposGroup group) { return null; }
-        
         private void CreateUnitObject(DisposEntry entry, GameObject parentGroup) { }
-        
-        private void ClearAllUnits()
-        {
-            foreach (var kvp in unitObjects)
-            {
-                if (kvp.Value != null)
-                {
-                    GameObject.DestroyImmediate(kvp.Value);
-                }
-            }
-            unitObjects.Clear();
-            entryToComponent.Clear();
-        }
-        
-        private void ClearAllGroups()
-        {
-            foreach (var kvp in groupObjects)
-            {
-                if (kvp.Value != null)
-                {
-                    GameObject.DestroyImmediate(kvp.Value);
-                }
-            }
-            groupObjects.Clear();
-        }
         
         public void DrawSceneGUI()
         {
@@ -460,107 +414,11 @@ namespace Editor
         public void SetShowIcons(bool show)
         {
             showIcons = show;
-            UpdateUnitVisuals();
             SceneView.RepaintAll();
         }
-        
-        private void UpdateUnitVisuals()
-        {
-            foreach (var kvp in unitObjects)
-            {
-                if (kvp.Value != null && kvp.Key != null)
-                {
-                    UpdateUnitSprite(kvp.Value, kvp.Key);
-                }
-            }
-        }
-        
-        private void UpdateUnitSprite(GameObject unitObj, DisposEntry entry)
-        {
-            // Icon renderer lives on the Visual child
-            SpriteRenderer renderer = null;
-            var visual = unitObj.transform.Find("Visual");
-            if (visual != null) renderer = visual.GetComponent<SpriteRenderer>();
-            if (renderer != null)
-            {
-                Texture2D icon = DisposDataLoader.Instance.GetUnitIcon(entry);
-                if (icon != null && showIcons)
-                {
-                    // Center pivot for flat-on-ground sprites
-                    Sprite sprite = Sprite.Create(icon, 
-                        new Rect(0, 0, icon.width, icon.height), 
-                        new Vector2(0.5f, 0.5f), 
-                        Mathf.Max(icon.width, icon.height));
-                    renderer.sprite = sprite;
-                    renderer.color = Color.white;
-                }
-                else
-                {
-                    // Ensure a visible fallback marker
-                    EnsureFallbackSprite();
-                    renderer.sprite = _fallbackSprite;
-                    renderer.color = DisposDataLoader.Instance.GetForceColor(entry.Force);
-                }
-            }
 
-            // Update opaque under-plate color beneath the icon
-            Transform plate = unitObj.transform.Find("Visual/UnitPlate");
-            if (plate != null)
-            {
-                var plateRenderer = plate.GetComponent<SpriteRenderer>();
-                if (plateRenderer != null)
-                {
-                    plateRenderer.color = DisposDataLoader.Instance.GetForceColor(entry.Force);
-                    ApplyOverlayMaterial(plateRenderer);
-                    plateRenderer.sortingOrder = 9999;
-                }
-            }
-        }
 
-        private static void EnsureFallbackSprite()
-        {
-            if (_fallbackSprite != null)
-                return;
-            if (_fallbackTex == null)
-            {
-                _fallbackTex = new Texture2D(2, 2, TextureFormat.RGBA32, false)
-                {
-                    name = "DisposUnit_FallbackTex"
-                };
-                // Fill with white
-                var cols = new Color[4] { Color.white, Color.white, Color.white, Color.white };
-                _fallbackTex.SetPixels(cols);
-                _fallbackTex.Apply();
-            }
-            // Center pivot for flat-on-ground sprites
-            _fallbackSprite = Sprite.Create(_fallbackTex, new Rect(0, 0, _fallbackTex.width, _fallbackTex.height), new Vector2(0.5f, 0.5f), 2f);
-            _fallbackSprite.name = "DisposUnit_FallbackSprite";
-        }
-
-        private float GetGroundYAt(float worldX, float worldZ, float defaultY)
-        {
-            // Raycast disabled; keep a fixed lifted height above base
-            return worldOffset.y + GROUND_LIFT;
-        }
-
-        private static Material _overlayMat;
-        private static void ApplyOverlayMaterial(SpriteRenderer r)
-        {
-            if (_overlayMat == null)
-            {
-                var sh = Shader.Find("Dispos/SpriteOverlayAlways");
-                if (sh != null)
-                {
-                    _overlayMat = new Material(sh);
-                    _overlayMat.name = "Dispos_SpriteOverlayAlways_Material";
-                    _overlayMat.hideFlags = HideFlags.HideAndDontSave;
-                }
-            }
-            if (_overlayMat != null)
-            {
-                r.sharedMaterial = _overlayMat;
-            }
-        }
+        // No fallback sprites or overlay materials needed in immediate-mode
         
         public void SetWorldOffset(Vector3 offset)
         {
