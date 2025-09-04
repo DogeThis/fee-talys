@@ -3,6 +3,7 @@ using System.Linq;
 using UnityEngine;
 using UnityEditor;
 using Bridge;
+using Editor;
 
 namespace Editor
 {
@@ -154,6 +155,7 @@ namespace Editor
         public string key;
         public Vector2 anchorGui;
         public Vector2 posGui;
+        public Vector2 preservedOffset; // preserved screen-space offset from anchor during camera movement
         public float width;
         public float height;
         public float priority;
@@ -187,14 +189,13 @@ namespace Editor
         // Screen-space relaxation state/tunables
         private static Dictionary<string, LabelNode> s_LabelNodes = new Dictionary<string, LabelNode>();
         private static bool relaxEnabled = true;
-        private static int relaxIterations = 3;
-        private static float relaxAnchorK = 0.18f;
+        private static int relaxIterations = 1;          // committed default
+        private static float relaxAnchorK = 0.05f;       // committed default
         private static float relaxMaxStepPx = 3.0f;
         private static float relaxRadiusPxBase = 40f;
-        private static bool relaxFreezeWhileMoving = true;
+        private static bool relaxFreezeWhileMoving = true; // preserve offsets while moving
         private static int relaxLargeIslandTiles = 80;
         private static float relaxPriorityLarge = 1.6f;
-        private static float relaxPriorityHover = 3.0f;
         private static float relaxViewportPad = 8f;
         
         // Camera movement detection
@@ -203,7 +204,10 @@ namespace Editor
         private static float lastCameraFOV;
         private static float cameraStillTime = 0f;
         private static bool cameraIsMoving = false;
-        private const float CAMERA_STILL_THRESHOLD = 0.3f; // Wait this long after camera stops
+        private static bool wasCameraMoving = false;
+        private static bool justStartedMoving = false;
+        // Configurable via Settings (Label Relaxation)
+        private static float cameraStillThreshold = 0.02f; // Seconds after camera stops before repulsion resumes (committed default)
         
         // Common 4-way neighbor directions
         private static readonly Vector2Int[] Directions4 = new Vector2Int[]
@@ -240,6 +244,7 @@ namespace Editor
         private const string PREFS_DISPLAY_MODE = PREFS_PREFIX + "DisplayMode";
         private const string PREFS_COLOR_OPACITY = PREFS_PREFIX + "ColorOpacity";
         private const string PREFS_COLOR_BRIGHTNESS = PREFS_PREFIX + "ColorBrightness";
+        // Relaxation settings are committed defaults; no EditorPrefs persistence
         
         private Vector2 scrollPosition;
         private List<MapTerrain> availableTerrains = new List<MapTerrain>();
@@ -251,6 +256,55 @@ namespace Editor
         private const float TILE_SIZE = 5f;
         private const float LABEL_ICON_SIZE = 8f;
         private const float LABEL_ICON_PADDING = 3f;
+        
+        // Advanced tab variables for resize
+        private static int newTerrainWidth = 50;
+        private static int newTerrainHeight = 50;
+        
+        // For shrinking, use enums to track which side to remove from
+        private enum ShrinkDirection
+        {
+            Left,
+            Right,
+            Center
+        }
+        private static ShrinkDirection shrinkHorizontal = ShrinkDirection.Right;
+        private static int shiftAmount = 1;
+        
+        private enum ShrinkDirectionVertical
+        {
+            Top,
+            Bottom,
+            Center
+        }
+        private static ShrinkDirectionVertical shrinkVertical = ShrinkDirectionVertical.Bottom;
+        
+        // Advanced operation preview modes
+        private enum MirrorMode
+        {
+            None,
+            Horizontal,
+            Vertical
+        }
+        private static MirrorMode mirrorPreviewMode = MirrorMode.None;
+        
+        private enum ShiftDirection
+        {
+            None,
+            Left,
+            Right,
+            Up,
+            Down
+        }
+        private static ShiftDirection shiftPreviewMode = ShiftDirection.None;
+        private static string[] previewTerrains = null;
+        
+        // PNG Export variables
+        private static int exportPixelsPerTile = 20;
+        private static bool exportIncludeGrid = true;
+        private static Color exportGridColor = new Color(0.3f, 0.3f, 0.3f, 1f);
+        private static int exportGridThickness = 1;
+        private static string exportPath = "";
         
         [MenuItem("Window/Terrain Paint Tool")]
         public static void ShowWindow()
@@ -394,17 +448,7 @@ namespace Editor
                 selectedTerrain = AssetDatabase.LoadAssetAtPath<MapTerrain>(terrainPath);
             }
             
-            // Relaxation prefs
-            relaxEnabled = EditorPrefs.GetBool(PREFS_PREFIX + "RelaxEnabled", true);
-            relaxIterations = EditorPrefs.GetInt(PREFS_PREFIX + "RelaxIters", 3);
-            relaxAnchorK = EditorPrefs.GetFloat(PREFS_PREFIX + "RelaxAnchorK", 0.18f);
-            relaxMaxStepPx = EditorPrefs.GetFloat(PREFS_PREFIX + "RelaxMaxStep", 3.0f);
-            relaxRadiusPxBase = EditorPrefs.GetFloat(PREFS_PREFIX + "RelaxRadius", 40f);
-            relaxFreezeWhileMoving = EditorPrefs.GetBool(PREFS_PREFIX + "RelaxFreezeMove", true);
-            relaxLargeIslandTiles = EditorPrefs.GetInt(PREFS_PREFIX + "RelaxLargeTiles", 80);
-            relaxPriorityLarge = EditorPrefs.GetFloat(PREFS_PREFIX + "RelaxPrLarge", 1.6f);
-            relaxPriorityHover = EditorPrefs.GetFloat(PREFS_PREFIX + "RelaxPrHover", 3.0f);
-            relaxViewportPad = EditorPrefs.GetFloat(PREFS_PREFIX + "RelaxViewportPad", 8f);
+            // Relaxation: committed defaults (no prefs load)
         }
         
         private void SaveSettings()
@@ -432,17 +476,7 @@ namespace Editor
                 EditorPrefs.SetString(PREFS_SELECTED_TERRAIN, "");
             }
 
-            // Relaxation prefs
-            EditorPrefs.SetBool(PREFS_PREFIX + "RelaxEnabled", relaxEnabled);
-            EditorPrefs.SetInt(PREFS_PREFIX + "RelaxIters", relaxIterations);
-            EditorPrefs.SetFloat(PREFS_PREFIX + "RelaxAnchorK", relaxAnchorK);
-            EditorPrefs.SetFloat(PREFS_PREFIX + "RelaxMaxStep", relaxMaxStepPx);
-            EditorPrefs.SetFloat(PREFS_PREFIX + "RelaxRadius", relaxRadiusPxBase);
-            EditorPrefs.SetBool(PREFS_PREFIX + "RelaxFreezeMove", relaxFreezeWhileMoving);
-            EditorPrefs.SetInt(PREFS_PREFIX + "RelaxLargeTiles", relaxLargeIslandTiles);
-            EditorPrefs.SetFloat(PREFS_PREFIX + "RelaxPrLarge", relaxPriorityLarge);
-            EditorPrefs.SetFloat(PREFS_PREFIX + "RelaxPrHover", relaxPriorityHover);
-            EditorPrefs.SetFloat(PREFS_PREFIX + "RelaxViewportPad", relaxViewportPad);
+            // Relaxation: committed defaults (no prefs save)
         }
         
         private void RefreshTerrainList()
@@ -471,7 +505,7 @@ namespace Editor
             }
         }
         
-        private static int uiTabIndex = 0; // 0 = Main, 1 = Settings
+        private static int uiTabIndex = 0; // 0 = Main, 1 = Settings, 2 = Advanced
 
         private void OnGUI()
         {
@@ -482,7 +516,7 @@ namespace Editor
             EditorGUILayout.Space(5);
 
             // Top-level tabs
-            uiTabIndex = GUILayout.Toolbar(uiTabIndex, new[] { "Main", "Settings" });
+            uiTabIndex = GUILayout.Toolbar(uiTabIndex, new[] { "Main", "Settings", "Advanced" });
             EditorGUILayout.Space(6);
             // MAIN PAGE header controls
             if (uiTabIndex == 0)
@@ -600,11 +634,7 @@ namespace Editor
                     SceneView.RepaintAll();
                 }
 
-                // Zoom metric for tuning
-                if (selectedTerrain != null && SceneView.lastActiveSceneView != null)
-                {
-                    Debug.Log($"Grid: {selectedTerrain.m_Width}x{selectedTerrain.m_Height} tiles");
-                }
+                // (removed) Zoom metric debug log
             }
             
             // Brush Painting Section
@@ -804,7 +834,296 @@ namespace Editor
                     }
                 }
             
+            // ADVANCED PAGE
+            if (uiTabIndex == 2)
+            {
+                EditorGUILayout.Space(10);
+                EditorGUILayout.LabelField("Advanced Tools", EditorStyles.boldLabel);
+                
+                if (selectedTerrain == null)
+                {
+                    EditorGUILayout.HelpBox("Please select a terrain first in the Main tab.", MessageType.Info);
+                }
+                else
+                {
+                    DrawAdvancedTab();
+                }
+            }
+            
             EditorGUILayout.EndScrollView();
+        }
+        
+        private void DrawAdvancedTab()
+        {
+            // Terrain Resize Section
+            EditorGUILayout.Space(10);
+            EditorGUILayout.LabelField("Terrain Resize", EditorStyles.boldLabel);
+            
+            // Initialize values from current terrain if they haven't been set
+            if (newTerrainWidth == 50 || newTerrainHeight == 50) // Default values
+            {
+                newTerrainWidth = selectedTerrain.m_Width;
+                newTerrainHeight = selectedTerrain.m_Height;
+            }
+            
+            // Current dimensions info
+            EditorGUILayout.HelpBox(
+                $"Current Size: {selectedTerrain.m_Width} x {selectedTerrain.m_Height}\n" +
+                $"Total Tiles: {selectedTerrain.m_Terrains?.Length ?? 0}",
+                MessageType.None);
+            
+            EditorGUILayout.Space(5);
+            
+            // New dimensions
+            EditorGUILayout.LabelField("New Dimensions", EditorStyles.miniBoldLabel);
+            EditorGUI.BeginChangeCheck();
+            newTerrainWidth = EditorGUILayout.IntField("New Width", Mathf.Max(1, newTerrainWidth));
+            newTerrainHeight = EditorGUILayout.IntField("New Height", Mathf.Max(1, newTerrainHeight));
+            bool resizeChanged = EditorGUI.EndChangeCheck();
+            
+            // Calculate size change
+            int widthChange = newTerrainWidth - selectedTerrain.m_Width;
+            int heightChange = newTerrainHeight - selectedTerrain.m_Height;
+            
+            if (widthChange != 0 || heightChange != 0)
+            {
+                EditorGUILayout.Space(5);
+                
+                // Width changes - only expand right
+                if (widthChange > 0)
+                {
+                    EditorGUILayout.HelpBox($"Will add {widthChange} columns to the right", MessageType.Info);
+                }
+                else if (widthChange < 0)
+                {
+                    EditorGUILayout.HelpBox($"Shrinking by {-widthChange} columns will permanently lose tile data!", MessageType.Warning);
+                    EditorGUI.BeginChangeCheck();
+                    shrinkHorizontal = (ShrinkDirection)EditorGUILayout.EnumPopup("Remove from", shrinkHorizontal);
+                    if (EditorGUI.EndChangeCheck())
+                    {
+                        SceneView.RepaintAll();
+                    }
+                }
+                
+                // Height changes - only expand bottom
+                if (heightChange > 0)
+                {
+                    EditorGUILayout.HelpBox($"Will add {heightChange} rows to the bottom", MessageType.Info);
+                }
+                else if (heightChange < 0)
+                {
+                    EditorGUILayout.HelpBox($"Shrinking by {-heightChange} rows will permanently lose tile data!", MessageType.Warning);
+                    EditorGUI.BeginChangeCheck();
+                    shrinkVertical = (ShrinkDirectionVertical)EditorGUILayout.EnumPopup("Remove from", shrinkVertical);
+                    if (EditorGUI.EndChangeCheck())
+                    {
+                        SceneView.RepaintAll();
+                    }
+                }
+                
+                EditorGUILayout.Space(5);
+                
+                // Always generate preview when dimensions change
+                if (resizeChanged)
+                {
+                    SceneView.RepaintAll();
+                }
+                
+                EditorGUILayout.Space(10);
+                
+                if (GUILayout.Button("Apply Resize", GUILayout.Height(30)))
+                {
+                    bool proceed = true;
+                    
+                    // Warn if shrinking
+                    if (widthChange < 0 || heightChange < 0)
+                    {
+                        proceed = EditorUtility.DisplayDialog(
+                            "Terrain Resize Warning",
+                            "Shrinking the terrain will permanently lose tile data that cannot be recovered by re-expanding.\n\n" +
+                            "This action can be undone with Ctrl+Z.\n\n" +
+                            "Continue?",
+                            "Yes, Resize",
+                            "Cancel"
+                        );
+                    }
+                    
+                    if (proceed)
+                    {
+                        ResizeTerrain();
+                        previewTerrains = null;
+                    }
+                }
+            }
+            else
+            {
+                EditorGUILayout.HelpBox("Adjust width or height to enable resize options.", MessageType.Info);
+                previewTerrains = null;
+            }
+            
+            EditorGUILayout.Space(20);
+            
+            // Mirror/Flip Tools
+            EditorGUILayout.LabelField("Mirror/Flip Tools", EditorStyles.boldLabel);
+            
+            EditorGUI.BeginChangeCheck();
+            mirrorPreviewMode = (MirrorMode)EditorGUILayout.EnumPopup("Mirror Mode", mirrorPreviewMode);
+            if (EditorGUI.EndChangeCheck())
+            {
+                if (mirrorPreviewMode != MirrorMode.None)
+                {
+                    GenerateMirrorPreview();
+                }
+                else
+                {
+                    previewTerrains = null;
+                }
+                SceneView.RepaintAll();
+            }
+            
+            if (mirrorPreviewMode != MirrorMode.None)
+            {
+                EditorGUILayout.HelpBox("Preview is shown in Scene view. Green = current, Blue = preview", MessageType.Info);
+                
+                if (GUILayout.Button($"Apply {mirrorPreviewMode} Mirror", GUILayout.Height(25)))
+                {
+                    if (mirrorPreviewMode == MirrorMode.Horizontal)
+                    {
+                        MirrorTerrainHorizontal();
+                    }
+                    else if (mirrorPreviewMode == MirrorMode.Vertical)
+                    {
+                        MirrorTerrainVertical();
+                    }
+                    mirrorPreviewMode = MirrorMode.None;
+                    previewTerrains = null;
+                    SceneView.RepaintAll();
+                }
+                
+                if (GUILayout.Button("Cancel", GUILayout.Height(20)))
+                {
+                    mirrorPreviewMode = MirrorMode.None;
+                    previewTerrains = null;
+                    SceneView.RepaintAll();
+                }
+            }
+            
+            // Shift Operations
+            EditorGUILayout.Space(20);
+            EditorGUILayout.LabelField("Shift Operations", EditorStyles.boldLabel);
+            
+            EditorGUILayout.BeginHorizontal();
+            EditorGUILayout.LabelField("Shift Amount:", GUILayout.Width(80));
+            EditorGUI.BeginChangeCheck();
+            shiftAmount = EditorGUILayout.IntSlider(shiftAmount, 1, Mathf.Max(selectedTerrain.m_Width, selectedTerrain.m_Height));
+            bool shiftAmountChanged = EditorGUI.EndChangeCheck();
+            EditorGUILayout.EndHorizontal();
+            
+            EditorGUI.BeginChangeCheck();
+            shiftPreviewMode = (ShiftDirection)EditorGUILayout.EnumPopup("Shift Direction", shiftPreviewMode);
+            bool shiftModeChanged = EditorGUI.EndChangeCheck();
+            
+            if ((shiftModeChanged || shiftAmountChanged) && shiftPreviewMode != ShiftDirection.None)
+            {
+                GenerateShiftPreview();
+                SceneView.RepaintAll();
+            }
+            
+            if (shiftPreviewMode != ShiftDirection.None)
+            {
+                EditorGUILayout.HelpBox("Preview is shown in Scene view. Green = current, Blue = preview\nData shifted out of bounds will be replaced with MTID_Nothing", MessageType.Info);
+                
+                if (GUILayout.Button($"Apply Shift {shiftPreviewMode}", GUILayout.Height(25)))
+                {
+                    switch (shiftPreviewMode)
+                    {
+                        case ShiftDirection.Left:
+                            ShiftTerrainHorizontal(-shiftAmount);
+                            break;
+                        case ShiftDirection.Right:
+                            ShiftTerrainHorizontal(shiftAmount);
+                            break;
+                        case ShiftDirection.Up:
+                            ShiftTerrainVertical(-shiftAmount);
+                            break;
+                        case ShiftDirection.Down:
+                            ShiftTerrainVertical(shiftAmount);
+                            break;
+                    }
+                    shiftPreviewMode = ShiftDirection.None;
+                    previewTerrains = null;
+                    SceneView.RepaintAll();
+                }
+                
+                if (GUILayout.Button("Cancel", GUILayout.Height(20)))
+                {
+                    shiftPreviewMode = ShiftDirection.None;
+                    previewTerrains = null;
+                    SceneView.RepaintAll();
+                }
+            }
+            
+            // PNG Export Section
+            EditorGUILayout.Space(20);
+            EditorGUILayout.LabelField("Export to PNG", EditorStyles.boldLabel);
+            EditorGUILayout.HelpBox("Export the terrain visualization as a PNG image file.", MessageType.Info);
+            
+            EditorGUILayout.Space(5);
+            
+            // Pixels per tile
+            EditorGUILayout.LabelField("Image Settings", EditorStyles.miniBoldLabel);
+            exportPixelsPerTile = EditorGUILayout.IntSlider("Pixels Per Tile", exportPixelsPerTile, 5, 100);
+            
+            // Calculate and show output size
+            int outputWidth = selectedTerrain.m_Width * exportPixelsPerTile;
+            int outputHeight = selectedTerrain.m_Height * exportPixelsPerTile;
+            if (exportIncludeGrid)
+            {
+                outputWidth += (selectedTerrain.m_Width + 1) * exportGridThickness;
+                outputHeight += (selectedTerrain.m_Height + 1) * exportGridThickness;
+            }
+            EditorGUILayout.LabelField($"Output Size: {outputWidth} x {outputHeight} pixels", EditorStyles.miniLabel);
+            
+            EditorGUILayout.Space(5);
+            
+            // Grid options
+            EditorGUILayout.LabelField("Grid Options", EditorStyles.miniBoldLabel);
+            exportIncludeGrid = EditorGUILayout.Toggle("Include Grid", exportIncludeGrid);
+            
+            if (exportIncludeGrid)
+            {
+                EditorGUI.indentLevel++;
+                exportGridColor = EditorGUILayout.ColorField("Grid Color", exportGridColor);
+                exportGridThickness = EditorGUILayout.IntSlider("Grid Thickness", exportGridThickness, 1, 5);
+                EditorGUI.indentLevel--;
+            }
+            
+            EditorGUILayout.Space(5);
+            
+            // Export button
+            if (GUILayout.Button("Export to PNG...", GUILayout.Height(30)))
+            {
+                // Open save file dialog
+                string defaultPath = TerrainPNGExporter.GetDefaultExportPath(selectedTerrain);
+                string path = EditorUtility.SaveFilePanel(
+                    "Export Terrain as PNG",
+                    System.IO.Path.GetDirectoryName(defaultPath),
+                    System.IO.Path.GetFileName(defaultPath),
+                    "png");
+                
+                if (!string.IsNullOrEmpty(path))
+                {
+                    TerrainPNGExporter.ExportToPNG(
+                        selectedTerrain,
+                        terrainDatabase,
+                        exportPixelsPerTile,
+                        exportIncludeGrid,
+                        exportGridColor,
+                        exportGridThickness,
+                        colorBrightness,
+                        path);
+                }
+            }
         }
         
         private static float GetCameraDistance(SceneView sceneView, float terrainCenterX, float terrainCenterZ, float terrainY)
@@ -859,7 +1178,7 @@ namespace Editor
                 {
                     // Camera hasn't moved this frame
                     cameraStillTime += deltaTime;
-                    if (cameraStillTime > CAMERA_STILL_THRESHOLD)
+                    if (cameraStillTime > cameraStillThreshold)
                     {
                         cameraIsMoving = false;
                     }
@@ -874,6 +1193,10 @@ namespace Editor
             HandleMouseInput(width, height, startX, startZ, y);
             
             bool isRepaint = Event.current.type == EventType.Repaint;
+
+            // Track movement transitions for label layout behavior
+            justStartedMoving = (!wasCameraMoving && cameraIsMoving);
+            wasCameraMoving = cameraIsMoving;
 
             // Draw colored tiles if in color mode
             if (isRepaint && terrainDatabase != null)
@@ -1119,11 +1442,14 @@ namespace Editor
                             // Node key: terrain + label tile
                             string nodeKey = island.terrainId + "|" + Mathf.RoundToInt(labelPos.x) + "x" + Mathf.RoundToInt(labelPos.y) + "|" + (int)textDisplayMode;
                             usedKeys.Add(nodeKey);
-                            if (!s_LabelNodes.TryGetValue(nodeKey, out var node))
+                            bool nodeExisted = s_LabelNodes.TryGetValue(nodeKey, out var node);
+                            if (!nodeExisted)
                             {
-                                node = new LabelNode { key = nodeKey, posGui = anchorGui };
+                                node = new LabelNode { key = nodeKey, posGui = anchorGui, preservedOffset = Vector2.zero };
                                 s_LabelNodes[nodeKey] = node;
                             }
+                            // Compute previous offset before updating anchor for movement preservation (only meaningful if node existed)
+                            Vector2 prevOffset = nodeExisted ? (node.posGui - node.anchorGui) : Vector2.zero;
                             node.anchorGui = anchorGui;
                             node.width = totalWidth;
                             node.height = totalHeight;
@@ -1132,6 +1458,11 @@ namespace Editor
                             float pr = 1f;
                             if (island.tiles != null && island.tiles.Count >= relaxLargeIslandTiles) pr *= relaxPriorityLarge;
                             node.priority = pr;
+                            // If movement just started this frame, preserve current offset so we don't undo repulsion while moving
+                            if (justStartedMoving)
+                            {
+                                node.preservedOffset = prevOffset;
+                            }
 
                             frameNodes.Add(node);
                         }
@@ -1140,31 +1471,61 @@ namespace Editor
                     // Relax layout in screen-space (no leaders)
                     if (relaxEnabled && frameNodes.Count > 0)
                     {
-                        // Radius shrinks with zoom-in to keep labels tight
-                        float radiusScale = Mathf.Clamp(80f / Mathf.Max(1f, 100f), 0.4f, 1.0f);
+                        // Radius shrinks with zoom-in to keep labels tight (based on camera distance)
+                        // Closer camera => smaller radius; farther => larger radius
+                        float tZoom = Mathf.InverseLerp(60f, 300f, cameraDistance);
+                        float radiusScale = Mathf.Lerp(0.4f, 1.0f, tZoom);
                         float maxRadius = relaxRadiusPxBase * radiusScale;
                         var sv = SceneView.currentDrawingSceneView;
                         float viewW = sv != null ? sv.position.width : Screen.width;
                         float viewH = sv != null ? sv.position.height : Screen.height;
 
-                        for (int iter = 0; iter < Mathf.Max(1, relaxIterations); iter++)
+                        if (cameraIsMoving && relaxFreezeWhileMoving)
                         {
-                            // Anchor spring
+                            // Preserve repulsion offset while moving
                             foreach (var n in frameNodes)
                             {
-                                n.posGui += (n.anchorGui - n.posGui) * Mathf.Clamp01(relaxAnchorK);
+                                n.posGui = n.anchorGui + n.preservedOffset;
                             }
-
-                            // Repulsion (freeze if moving)
-                            if (!(relaxFreezeWhileMoving && cameraIsMoving))
+                            // Clamp to radius and viewport
+                            foreach (var n in frameNodes)
                             {
+                                Vector2 d = n.posGui - n.anchorGui;
+                                float md = d.magnitude;
+                                if (md > maxRadius)
+                                {
+                                    n.posGui = n.anchorGui + d * (maxRadius / md);
+                                }
+                                float pad = relaxViewportPad;
+                                n.posGui.x = Mathf.Clamp(n.posGui.x, pad + n.width * 0.5f, viewW - pad - n.width * 0.5f);
+                                n.posGui.y = Mathf.Clamp(n.posGui.y, pad + n.height * 0.5f, viewH - pad - n.height * 0.5f);
+                            }
+                        }
+                        else
+                        {
+                            // Normal relaxation (when still, or when moving with freeze disabled)
+                            float anchorK = relaxAnchorK;
+                            int iters = relaxIterations;
+                            if (cameraIsMoving && !relaxFreezeWhileMoving)
+                            {
+                                // Slight boost while moving to reduce visible lag
+                                anchorK = Mathf.Max(relaxAnchorK, 0.28f);
+                                iters = Mathf.Max(relaxIterations, 4);
+                            }
+                            for (int iter = 0; iter < Mathf.Max(1, iters); iter++)
+                            {
+                                // Anchor spring
+                                foreach (var n in frameNodes)
+                                {
+                                    n.posGui += (n.anchorGui - n.posGui) * Mathf.Clamp01(anchorK);
+                                }
+                                // Repulsion
                                 for (int i = 0; i < frameNodes.Count; i++)
                                 {
                                     var a = frameNodes[i];
                                     for (int j = i + 1; j < frameNodes.Count; j++)
                                     {
                                         var b = frameNodes[j];
-                                        // AABB overlap check using centers and sizes
                                         float ax = a.posGui.x, ay = a.posGui.y;
                                         float bx = b.posGui.x, by = b.posGui.y;
                                         float halfW = (a.width + b.width) * 0.5f;
@@ -1175,7 +1536,6 @@ namespace Editor
                                         float oy = halfH - Mathf.Abs(dy);
                                         if (ox > 0 && oy > 0)
                                         {
-                                            // Push along axis of least penetration
                                             Vector2 push;
                                             if (ox < oy)
                                             {
@@ -1188,28 +1548,32 @@ namespace Editor
                                             float pa = Mathf.Max(0.001f, a.priority);
                                             float pb = Mathf.Max(0.001f, b.priority);
                                             float sum = pa + pb;
-                                            // High priority yields less
                                             a.posGui += push * (pb / sum);
                                             b.posGui -= push * (pa / sum);
                                         }
                                     }
                                 }
-                            }
-
-                            // Clamp to radius and viewport
-                            foreach (var n in frameNodes)
-                            {
-                                // Max displacement from anchor
-                                Vector2 d = n.posGui - n.anchorGui;
-                                float md = d.magnitude;
-                                if (md > maxRadius)
+                                // Clamp to radius and viewport
+                                foreach (var n in frameNodes)
                                 {
-                                    n.posGui = n.anchorGui + d * (maxRadius / md);
+                                    Vector2 d = n.posGui - n.anchorGui;
+                                    float md = d.magnitude;
+                                    if (md > maxRadius)
+                                    {
+                                        n.posGui = n.anchorGui + d * (maxRadius / md);
+                                    }
+                                    float pad = relaxViewportPad;
+                                    n.posGui.x = Mathf.Clamp(n.posGui.x, pad + n.width * 0.5f, viewW - pad - n.width * 0.5f);
+                                    n.posGui.y = Mathf.Clamp(n.posGui.y, pad + n.height * 0.5f, viewH - pad - n.height * 0.5f);
                                 }
-                                // Viewport clamp
-                                float pad = relaxViewportPad;
-                                n.posGui.x = Mathf.Clamp(n.posGui.x, pad + n.width * 0.5f, viewW - pad - n.width * 0.5f);
-                                n.posGui.y = Mathf.Clamp(n.posGui.y, pad + n.height * 0.5f, viewH - pad - n.height * 0.5f);
+                            }
+                            // After relaxing, update preserved offsets for next move start (only if not moving)
+                            if (!cameraIsMoving)
+                            {
+                                foreach (var n in frameNodes)
+                                {
+                                    n.preservedOffset = n.posGui - n.anchorGui;
+                                }
                             }
                         }
                     }
@@ -1304,6 +1668,21 @@ namespace Editor
             if (paintMode && isMouseOverGrid)
             {
                 DrawBrushPreview(hoveredTile, width, height, startX, startZ, y);
+            }
+            
+            // Draw previews when in Advanced tab
+            if (uiTabIndex == 2 && selectedTerrain != null)
+            {
+                // Always show resize preview when dimensions are different
+                if (newTerrainWidth != width || newTerrainHeight != height)
+                {
+                    DrawResizePreview(width, height, startX, startZ, y);
+                }
+                
+                if (previewTerrains != null && (mirrorPreviewMode != MirrorMode.None || shiftPreviewMode != ShiftDirection.None))
+                {
+                    DrawAdvancedOperationPreview(width, height, startX, startZ, y);
+                }
             }
             
             // Repaint when camera is moving or has just stopped
@@ -1597,9 +1976,6 @@ namespace Editor
                         string terrainToSample = selectedTerrain.m_Terrains[index];
                         if (!string.IsNullOrEmpty(terrainToSample))
                         {
-                            // Debug: Log what we're sampling
-                            Debug.Log($"Sampling at ({centerTile.x}, {centerTile.y}): {terrainToSample}");
-                            
                             // Get base color from database
                             Color terrainColor = terrainDatabase.GetTerrainColor(terrainToSample, Color.gray);
                             
@@ -1795,7 +2171,6 @@ namespace Editor
             if (index < selectedTerrain.m_Terrains.Length)
             {
                 selectedBrushTerrain = selectedTerrain.m_Terrains[index];
-                Debug.Log($"Picked terrain: {selectedBrushTerrain}");
                 
                 // Force UI refresh to show the newly selected terrain
                 if (instance != null)
@@ -2366,6 +2741,697 @@ namespace Editor
                     
                 default:
                     return tid;
+            }
+        }
+        
+        private static void DrawResizePreview(int currentWidth, int currentHeight, float startX, float startZ, float y)
+        {
+            if (selectedTerrain == null) return;
+            
+            int widthChange = newTerrainWidth - currentWidth;
+            int heightChange = newTerrainHeight - currentHeight;
+            
+            // Show preview for both expansion and shrinking
+            if (widthChange == 0 && heightChange == 0) return;
+            
+            // Draw expansion areas in green
+            if (widthChange > 0)
+            {
+                Color expandColor = new Color(0f, 1f, 0f, 0.3f);
+                // Expand to the right only
+                for (int row = 0; row < currentHeight; row++)
+                {
+                    for (int col = currentWidth; col < newTerrainWidth; col++)
+                    {
+                        float tileX = startX + col * TILE_SIZE;
+                        float tileZ = startZ + row * TILE_SIZE;
+                        
+                        Vector3[] verts = new Vector3[]
+                        {
+                            new Vector3(tileX, y + 0.05f, tileZ),
+                            new Vector3(tileX + TILE_SIZE, y + 0.05f, tileZ),
+                            new Vector3(tileX + TILE_SIZE, y + 0.05f, tileZ + TILE_SIZE),
+                            new Vector3(tileX, y + 0.05f, tileZ + TILE_SIZE)
+                        };
+                        
+                        Handles.DrawSolidRectangleWithOutline(verts, expandColor, Color.green);
+                    }
+                }
+            }
+            
+            if (heightChange > 0)
+            {
+                Color expandColor = new Color(0f, 1f, 0f, 0.3f);
+                // Expand to the bottom only
+                for (int row = currentHeight; row < newTerrainHeight; row++)
+                {
+                    for (int col = 0; col < newTerrainWidth; col++)
+                    {
+                        // Don't double-draw the corner if both width and height are expanding
+                        if (widthChange > 0 && col >= currentWidth) continue;
+                        
+                        float tileX = startX + col * TILE_SIZE;
+                        float tileZ = startZ + row * TILE_SIZE;
+                        
+                        Vector3[] verts = new Vector3[]
+                        {
+                            new Vector3(tileX, y + 0.05f, tileZ),
+                            new Vector3(tileX + TILE_SIZE, y + 0.05f, tileZ),
+                            new Vector3(tileX + TILE_SIZE, y + 0.05f, tileZ + TILE_SIZE),
+                            new Vector3(tileX, y + 0.05f, tileZ + TILE_SIZE)
+                        };
+                        
+                        Handles.DrawSolidRectangleWithOutline(verts, expandColor, Color.green);
+                    }
+                }
+            }
+            
+            // Continue with shrinking preview
+            if (widthChange >= 0 && heightChange >= 0) return;
+            
+            // Calculate which tiles will be removed
+            int removeLeft = 0, removeRight = 0, removeTop = 0, removeBottom = 0;
+            
+            if (widthChange < 0) // Shrinking width
+            {
+                int totalRemove = -widthChange;
+                switch (shrinkHorizontal)
+                {
+                    case ShrinkDirection.Left:
+                        removeLeft = totalRemove;
+                        break;
+                    case ShrinkDirection.Right:
+                        removeRight = totalRemove;
+                        break;
+                    case ShrinkDirection.Center:
+                        removeLeft = totalRemove / 2;
+                        removeRight = totalRemove - removeLeft;
+                        break;
+                }
+            }
+            
+            if (heightChange < 0) // Shrinking height
+            {
+                int totalRemove = -heightChange;
+                switch (shrinkVertical)
+                {
+                    case ShrinkDirectionVertical.Top:
+                        removeTop = totalRemove;
+                        break;
+                    case ShrinkDirectionVertical.Bottom:
+                        removeBottom = totalRemove;
+                        break;
+                    case ShrinkDirectionVertical.Center:
+                        removeBottom = totalRemove / 2;
+                        removeTop = totalRemove - removeBottom;
+                        break;
+                }
+            }
+            
+            // Draw red overlay on tiles that will be removed
+            Color removeColor = new Color(1f, 0f, 0f, 0.3f);
+            Color removeBorder = new Color(1f, 0f, 0f, 0.8f);
+            
+            // Draw left removal area
+            if (removeLeft > 0)
+            {
+                for (int row = 0; row < currentHeight; row++)
+                {
+                    for (int col = 0; col < removeLeft; col++)
+                    {
+                        DrawRemovalTile(col, row, startX, startZ, y, removeColor);
+                    }
+                }
+            }
+            
+            // Draw right removal area
+            if (removeRight > 0)
+            {
+                for (int row = 0; row < currentHeight; row++)
+                {
+                    for (int col = currentWidth - removeRight; col < currentWidth; col++)
+                    {
+                        DrawRemovalTile(col, row, startX, startZ, y, removeColor);
+                    }
+                }
+            }
+            
+            // Draw bottom removal area
+            if (removeBottom > 0)
+            {
+                for (int row = 0; row < removeBottom; row++)
+                {
+                    for (int col = removeLeft; col < currentWidth - removeRight; col++)
+                    {
+                        DrawRemovalTile(col, row, startX, startZ, y, removeColor);
+                    }
+                }
+            }
+            
+            // Draw top removal area
+            if (removeTop > 0)
+            {
+                for (int row = currentHeight - removeTop; row < currentHeight; row++)
+                {
+                    for (int col = removeLeft; col < currentWidth - removeRight; col++)
+                    {
+                        DrawRemovalTile(col, row, startX, startZ, y, removeColor);
+                    }
+                }
+            }
+            
+            // Draw border around removal areas
+            Handles.color = removeBorder;
+            float borderY = y + 0.08f;
+            
+            // Left border
+            if (removeLeft > 0)
+            {
+                Vector3 start = new Vector3(startX + removeLeft * TILE_SIZE, borderY, startZ);
+                Vector3 end = new Vector3(startX + removeLeft * TILE_SIZE, borderY, startZ + currentHeight * TILE_SIZE);
+                Handles.DrawLine(start, end, 3f);
+            }
+            
+            // Right border
+            if (removeRight > 0)
+            {
+                Vector3 start = new Vector3(startX + (currentWidth - removeRight) * TILE_SIZE, borderY, startZ);
+                Vector3 end = new Vector3(startX + (currentWidth - removeRight) * TILE_SIZE, borderY, startZ + currentHeight * TILE_SIZE);
+                Handles.DrawLine(start, end, 3f);
+            }
+            
+            // Bottom border
+            if (removeBottom > 0)
+            {
+                Vector3 start = new Vector3(startX, borderY, startZ + removeBottom * TILE_SIZE);
+                Vector3 end = new Vector3(startX + currentWidth * TILE_SIZE, borderY, startZ + removeBottom * TILE_SIZE);
+                Handles.DrawLine(start, end, 3f);
+            }
+            
+            // Top border
+            if (removeTop > 0)
+            {
+                Vector3 start = new Vector3(startX, borderY, startZ + (currentHeight - removeTop) * TILE_SIZE);
+                Vector3 end = new Vector3(startX + currentWidth * TILE_SIZE, borderY, startZ + (currentHeight - removeTop) * TILE_SIZE);
+                Handles.DrawLine(start, end, 3f);
+            }
+        }
+        
+        private static void DrawRemovalTile(int col, int row, float startX, float startZ, float y, Color color)
+        {
+            float tileX = startX + col * TILE_SIZE;
+            float tileZ = startZ + row * TILE_SIZE;
+            
+            Vector3[] verts = new Vector3[]
+            {
+                new Vector3(tileX, y + 0.07f, tileZ),
+                new Vector3(tileX + TILE_SIZE, y + 0.07f, tileZ),
+                new Vector3(tileX + TILE_SIZE, y + 0.07f, tileZ + TILE_SIZE),
+                new Vector3(tileX, y + 0.07f, tileZ + TILE_SIZE)
+            };
+            
+            Handles.DrawSolidRectangleWithOutline(verts, color, Color.clear);
+            
+            // Draw X pattern
+            Handles.color = new Color(1f, 0f, 0f, 0.5f);
+            Handles.DrawLine(
+                new Vector3(tileX, y + 0.08f, tileZ),
+                new Vector3(tileX + TILE_SIZE, y + 0.08f, tileZ + TILE_SIZE), 2f
+            );
+            Handles.DrawLine(
+                new Vector3(tileX + TILE_SIZE, y + 0.08f, tileZ),
+                new Vector3(tileX, y + 0.08f, tileZ + TILE_SIZE), 2f
+            );
+        }
+        
+        private void ResizeTerrain()
+        {
+            if (selectedTerrain == null) return;
+            
+            Undo.RecordObject(selectedTerrain, "Resize Terrain");
+            
+            int oldWidth = selectedTerrain.m_Width;
+            int oldHeight = selectedTerrain.m_Height;
+            string[] oldTerrains = selectedTerrain.m_Terrains;
+            
+            // Create 2D representation of old data
+            string[,] oldGrid = new string[oldHeight, oldWidth];
+            for (int y = 0; y < oldHeight; y++)
+            {
+                for (int x = 0; x < oldWidth; x++)
+                {
+                    int index = y * oldWidth + x;
+                    if (index < oldTerrains.Length)
+                    {
+                        oldGrid[y, x] = oldTerrains[index];
+                    }
+                }
+            }
+            
+            // Create new grid with MTID_Nothing as default
+            string[,] newGrid = new string[newTerrainHeight, newTerrainWidth];
+            for (int y = 0; y < newTerrainHeight; y++)
+            {
+                for (int x = 0; x < newTerrainWidth; x++)
+                {
+                    newGrid[y, x] = "MTID_Nothing";
+                }
+            }
+            
+            // Calculate offsets based on expand/shrink direction
+            int offsetX = 0;
+            int offsetY = 0;
+            
+            int widthChange = newTerrainWidth - oldWidth;
+            int heightChange = newTerrainHeight - oldHeight;
+            
+            // Calculate X offset
+            if (widthChange > 0) // Expanding - always to the right
+            {
+                offsetX = 0; // Expand right means existing data stays at same position
+            }
+            else if (widthChange < 0) // Shrinking
+            {
+                switch (shrinkHorizontal)
+                {
+                    case ShrinkDirection.Left:
+                        offsetX = widthChange;
+                        break;
+                    case ShrinkDirection.Right:
+                        offsetX = 0;
+                        break;
+                    case ShrinkDirection.Center:
+                        offsetX = widthChange / 2;
+                        break;
+                }
+            }
+            
+            // Calculate Y offset
+            if (heightChange > 0) // Expanding - always to the bottom
+            {
+                offsetY = 0; // Expand bottom means existing data stays at same position
+            }
+            else if (heightChange < 0) // Shrinking
+            {
+                switch (shrinkVertical)
+                {
+                    case ShrinkDirectionVertical.Top:
+                        offsetY = heightChange;
+                        break;
+                    case ShrinkDirectionVertical.Bottom:
+                        offsetY = 0;
+                        break;
+                    case ShrinkDirectionVertical.Center:
+                        offsetY = heightChange / 2;
+                        break;
+                }
+            }
+            
+            // Copy old data to new grid with offset
+            for (int y = 0; y < oldHeight; y++)
+            {
+                for (int x = 0; x < oldWidth; x++)
+                {
+                    int newX = x + offsetX;
+                    int newY = y + offsetY;
+                    
+                    if (newX >= 0 && newX < newTerrainWidth && 
+                        newY >= 0 && newY < newTerrainHeight)
+                    {
+                        newGrid[newY, newX] = oldGrid[y, x];
+                    }
+                }
+            }
+            
+            // Convert back to 1D array
+            string[] newTerrains = new string[newTerrainWidth * newTerrainHeight];
+            for (int y = 0; y < newTerrainHeight; y++)
+            {
+                for (int x = 0; x < newTerrainWidth; x++)
+                {
+                    newTerrains[y * newTerrainWidth + x] = newGrid[y, x];
+                }
+            }
+            
+            // Apply changes to terrain
+            selectedTerrain.m_Width = newTerrainWidth;
+            selectedTerrain.m_Height = newTerrainHeight;
+            selectedTerrain.m_Terrains = newTerrains;
+            
+            EditorUtility.SetDirty(selectedTerrain);
+            
+            // Clear caches
+            islandCache.Clear();
+            lastCachedTerrain = null;
+            cachedHoverRegion = null;
+            s_LabelNodes.Clear();
+            
+            SceneView.RepaintAll();
+            Debug.Log($"Terrain resized from {oldWidth}x{oldHeight} to {newTerrainWidth}x{newTerrainHeight}");
+        }
+        
+        private static void MirrorTerrainHorizontal()
+        {
+            if (selectedTerrain == null) return;
+            
+            Undo.RecordObject(selectedTerrain, "Mirror Terrain Horizontal");
+            
+            int width = selectedTerrain.m_Width;
+            int height = selectedTerrain.m_Height;
+            string[] terrains = selectedTerrain.m_Terrains;
+            
+            // Create mirrored array
+            string[] mirrored = new string[terrains.Length];
+            
+            for (int y = 0; y < height; y++)
+            {
+                for (int x = 0; x < width; x++)
+                {
+                    int srcIndex = y * width + x;
+                    int destIndex = y * width + (width - 1 - x);
+                    
+                    if (srcIndex < terrains.Length)
+                    {
+                        mirrored[destIndex] = terrains[srcIndex];
+                    }
+                }
+            }
+            
+            selectedTerrain.m_Terrains = mirrored;
+            EditorUtility.SetDirty(selectedTerrain);
+            
+            // Clear caches
+            islandCache.Clear();
+            lastCachedTerrain = null;
+            cachedHoverRegion = null;
+            s_LabelNodes.Clear();
+            
+            SceneView.RepaintAll();
+            Debug.Log("Terrain mirrored horizontally");
+        }
+        
+        private static void MirrorTerrainVertical()
+        {
+            if (selectedTerrain == null) return;
+            
+            Undo.RecordObject(selectedTerrain, "Mirror Terrain Vertical");
+            
+            int width = selectedTerrain.m_Width;
+            int height = selectedTerrain.m_Height;
+            string[] terrains = selectedTerrain.m_Terrains;
+            
+            // Create mirrored array
+            string[] mirrored = new string[terrains.Length];
+            
+            for (int y = 0; y < height; y++)
+            {
+                for (int x = 0; x < width; x++)
+                {
+                    int srcIndex = y * width + x;
+                    int destIndex = (height - 1 - y) * width + x;
+                    
+                    if (srcIndex < terrains.Length)
+                    {
+                        mirrored[destIndex] = terrains[srcIndex];
+                    }
+                }
+            }
+            
+            selectedTerrain.m_Terrains = mirrored;
+            EditorUtility.SetDirty(selectedTerrain);
+            
+            // Clear caches
+            islandCache.Clear();
+            lastCachedTerrain = null;
+            cachedHoverRegion = null;
+            s_LabelNodes.Clear();
+            
+            SceneView.RepaintAll();
+            Debug.Log("Terrain mirrored vertically");
+        }
+        
+        private static void ShiftTerrainHorizontal(int amount)
+        {
+            if (selectedTerrain == null) return;
+            
+            Undo.RecordObject(selectedTerrain, $"Shift Terrain {(amount > 0 ? "Right" : "Left")}");
+            
+            int width = selectedTerrain.m_Width;
+            int height = selectedTerrain.m_Height;
+            string[] terrains = selectedTerrain.m_Terrains;
+            
+            // Create shifted array, fill with MTID_Nothing by default
+            string[] shifted = new string[terrains.Length];
+            for (int i = 0; i < shifted.Length; i++)
+            {
+                shifted[i] = "MTID_Nothing";
+            }
+            
+            // Copy data to shifted positions
+            for (int y = 0; y < height; y++)
+            {
+                for (int x = 0; x < width; x++)
+                {
+                    int srcIndex = y * width + x;
+                    int newX = x + amount;
+                    
+                    // Only copy if the new position is within bounds
+                    if (newX >= 0 && newX < width && srcIndex < terrains.Length)
+                    {
+                        int destIndex = y * width + newX;
+                        shifted[destIndex] = terrains[srcIndex];
+                    }
+                }
+            }
+            
+            selectedTerrain.m_Terrains = shifted;
+            EditorUtility.SetDirty(selectedTerrain);
+            
+            // Clear caches
+            islandCache.Clear();
+            lastCachedTerrain = null;
+            cachedHoverRegion = null;
+            s_LabelNodes.Clear();
+            
+            SceneView.RepaintAll();
+            Debug.Log($"Terrain shifted horizontally by {amount}");
+        }
+        
+        private static void ShiftTerrainVertical(int amount)
+        {
+            if (selectedTerrain == null) return;
+            
+            Undo.RecordObject(selectedTerrain, $"Shift Terrain {(amount > 0 ? "Down" : "Up")}");
+            
+            int width = selectedTerrain.m_Width;
+            int height = selectedTerrain.m_Height;
+            string[] terrains = selectedTerrain.m_Terrains;
+            
+            // Create shifted array, fill with MTID_Nothing by default
+            string[] shifted = new string[terrains.Length];
+            for (int i = 0; i < shifted.Length; i++)
+            {
+                shifted[i] = "MTID_Nothing";
+            }
+            
+            // Copy data to shifted positions
+            for (int y = 0; y < height; y++)
+            {
+                for (int x = 0; x < width; x++)
+                {
+                    int srcIndex = y * width + x;
+                    int newY = y + amount;
+                    
+                    // Only copy if the new position is within bounds
+                    if (newY >= 0 && newY < height && srcIndex < terrains.Length)
+                    {
+                        int destIndex = newY * width + x;
+                        shifted[destIndex] = terrains[srcIndex];
+                    }
+                }
+            }
+            
+            selectedTerrain.m_Terrains = shifted;
+            EditorUtility.SetDirty(selectedTerrain);
+            
+            // Clear caches
+            islandCache.Clear();
+            lastCachedTerrain = null;
+            cachedHoverRegion = null;
+            s_LabelNodes.Clear();
+            
+            SceneView.RepaintAll();
+            Debug.Log($"Terrain shifted vertically by {amount}");
+        }
+        
+        private static void GenerateResizePreview()
+        {
+            if (selectedTerrain == null) return;
+            
+            int oldWidth = selectedTerrain.m_Width;
+            int oldHeight = selectedTerrain.m_Height;
+            
+            // For expand preview, just show current terrain
+            // The scene drawing will show the new areas in green
+            previewTerrains = (string[])selectedTerrain.m_Terrains.Clone();
+        }
+        
+        private static void GenerateMirrorPreview()
+        {
+            if (selectedTerrain == null) return;
+            
+            int width = selectedTerrain.m_Width;
+            int height = selectedTerrain.m_Height;
+            string[] terrains = selectedTerrain.m_Terrains;
+            
+            previewTerrains = new string[terrains.Length];
+            
+            if (mirrorPreviewMode == MirrorMode.Horizontal)
+            {
+                // Mirror horizontally
+                for (int y = 0; y < height; y++)
+                {
+                    for (int x = 0; x < width; x++)
+                    {
+                        int srcIndex = y * width + x;
+                        int destIndex = y * width + (width - 1 - x);
+                        
+                        if (srcIndex < terrains.Length)
+                        {
+                            previewTerrains[destIndex] = terrains[srcIndex];
+                        }
+                    }
+                }
+            }
+            else if (mirrorPreviewMode == MirrorMode.Vertical)
+            {
+                // Mirror vertically
+                for (int y = 0; y < height; y++)
+                {
+                    for (int x = 0; x < width; x++)
+                    {
+                        int srcIndex = y * width + x;
+                        int destIndex = (height - 1 - y) * width + x;
+                        
+                        if (srcIndex < terrains.Length)
+                        {
+                            previewTerrains[destIndex] = terrains[srcIndex];
+                        }
+                    }
+                }
+            }
+        }
+        
+        private static void GenerateShiftPreview()
+        {
+            if (selectedTerrain == null) return;
+            
+            int width = selectedTerrain.m_Width;
+            int height = selectedTerrain.m_Height;
+            string[] terrains = selectedTerrain.m_Terrains;
+            
+            // Initialize with MTID_Nothing
+            previewTerrains = new string[terrains.Length];
+            for (int i = 0; i < previewTerrains.Length; i++)
+            {
+                previewTerrains[i] = "MTID_Nothing";
+            }
+            
+            int shiftX = 0, shiftY = 0;
+            switch (shiftPreviewMode)
+            {
+                case ShiftDirection.Left:
+                    shiftX = -shiftAmount;
+                    break;
+                case ShiftDirection.Right:
+                    shiftX = shiftAmount;
+                    break;
+                case ShiftDirection.Up:
+                    shiftY = -shiftAmount;
+                    break;
+                case ShiftDirection.Down:
+                    shiftY = shiftAmount;
+                    break;
+            }
+            
+            // Copy shifted data
+            for (int y = 0; y < height; y++)
+            {
+                for (int x = 0; x < width; x++)
+                {
+                    int srcIndex = y * width + x;
+                    int newX = x + shiftX;
+                    int newY = y + shiftY;
+                    
+                    if (newX >= 0 && newX < width && newY >= 0 && newY < height && srcIndex < terrains.Length)
+                    {
+                        int destIndex = newY * width + newX;
+                        previewTerrains[destIndex] = terrains[srcIndex];
+                    }
+                }
+            }
+        }
+        
+        private static void DrawAdvancedOperationPreview(int width, int height, float startX, float startZ, float y)
+        {
+            if (previewTerrains == null || terrainDatabase == null) return;
+            
+            // Draw current terrain in semi-transparent green
+            Color currentColor = new Color(0f, 1f, 0f, 0.3f);
+            for (int row = 0; row < height; row++)
+            {
+                for (int col = 0; col < width; col++)
+                {
+                    int index = row * width + col;
+                    if (index >= selectedTerrain.m_Terrains.Length) continue;
+                    
+                    string terrainId = selectedTerrain.m_Terrains[index];
+                    if (string.IsNullOrEmpty(terrainId) || terrainId == "MTID_Nothing") continue;
+                    
+                    float tileX = startX + col * TILE_SIZE;
+                    float tileZ = startZ + row * TILE_SIZE;
+                    
+                    Vector3[] verts = new Vector3[]
+                    {
+                        new Vector3(tileX, y + 0.02f, tileZ),
+                        new Vector3(tileX + TILE_SIZE, y + 0.02f, tileZ),
+                        new Vector3(tileX + TILE_SIZE, y + 0.02f, tileZ + TILE_SIZE),
+                        new Vector3(tileX, y + 0.02f, tileZ + TILE_SIZE)
+                    };
+                    
+                    Handles.DrawSolidRectangleWithOutline(verts, currentColor, Color.clear);
+                }
+            }
+            
+            // Draw preview terrain in semi-transparent blue
+            Color previewColor = new Color(0f, 0.5f, 1f, 0.5f);
+            for (int row = 0; row < height; row++)
+            {
+                for (int col = 0; col < width; col++)
+                {
+                    int index = row * width + col;
+                    if (index >= previewTerrains.Length) continue;
+                    
+                    string terrainId = previewTerrains[index];
+                    if (string.IsNullOrEmpty(terrainId) || terrainId == "MTID_Nothing") continue;
+                    
+                    float tileX = startX + col * TILE_SIZE;
+                    float tileZ = startZ + row * TILE_SIZE;
+                    
+                    // Get color from terrain database
+                    Color tileColor = terrainDatabase.GetTerrainColor(terrainId, previewColor);
+                    tileColor.a = 0.6f; // Make semi-transparent
+                    
+                    Vector3[] verts = new Vector3[]
+                    {
+                        new Vector3(tileX, y + 0.04f, tileZ),
+                        new Vector3(tileX + TILE_SIZE, y + 0.04f, tileZ),
+                        new Vector3(tileX + TILE_SIZE, y + 0.04f, tileZ + TILE_SIZE),
+                        new Vector3(tileX, y + 0.04f, tileZ + TILE_SIZE)
+                    };
+                    
+                    Handles.DrawSolidRectangleWithOutline(verts, tileColor, Color.blue);
+                }
             }
         }
         
