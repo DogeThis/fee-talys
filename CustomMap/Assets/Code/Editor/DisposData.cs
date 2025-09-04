@@ -51,6 +51,17 @@ namespace Editor
         public int AI_BandNo;
         public string AI_MoveLimit;
         public int AI_Flag;
+        public string AI_Active;
+        public int AI_ActiveTurn;
+        public string AI_ActiveFlag;
+        
+        // Simplified item accessors for compatibility
+        public string Item1 { get => Items[0]?.Iid; set => Items[0].Iid = value; }
+        public string Item2 { get => Items[1]?.Iid; set => Items[1].Iid = value; }
+        public string Item3 { get => Items[2]?.Iid; set => Items[2].Iid = value; }
+        public string Item4 { get => Items[3]?.Iid; set => Items[3].Iid = value; }
+        public string Item5 { get => Items[4]?.Iid; set => Items[4].Iid = value; }
+        public string Item6 { get => Items[5]?.Iid; set => Items[5].Iid = value; }
         
         private Dictionary<string, string> additionalAttributes = new Dictionary<string, string>();
         
@@ -149,10 +160,16 @@ namespace Editor
                             Entries = new List<DisposEntry>()
                         };
                         doc.Groups.Add(currentGroup);
+                        Debug.Log($"Found group header: {entry.Group}");
                     }
                     else if (currentGroup != null)
                     {
                         currentGroup.Entries.Add(entry);
+                        Debug.Log($"Added entry to group {currentGroup.GroupName}: {entry.Pid} at ({entry.DisposX}, {entry.DisposY})");
+                    }
+                    else
+                    {
+                        Debug.LogWarning($"Entry {entry.Pid} has no group!");
                     }
                 }
                 
@@ -211,6 +228,9 @@ namespace Editor
             entry.AI_BandNo = ParseInt(node.Attributes["AI_BandNo"]?.Value);
             entry.AI_MoveLimit = node.Attributes["AI_MoveLimit"]?.Value ?? "";
             entry.AI_Flag = ParseInt(node.Attributes["AI_Flag"]?.Value);
+            entry.AI_Active = node.Attributes["AI_Active"]?.Value ?? "";
+            entry.AI_ActiveTurn = ParseInt(node.Attributes["AI_ActiveTurn"]?.Value);
+            entry.AI_ActiveFlag = node.Attributes["AI_ActiveFlag"]?.Value ?? "";
             
             foreach (XmlAttribute attr in node.Attributes)
             {
@@ -234,7 +254,8 @@ namespace Editor
                 "Item4.Iid", "Item4.Drop", "Item5.Iid", "Item5.Drop", "Item6.Iid", "Item6.Drop",
                 "AI_ActionName", "AI_ActionVal", "AI_MindName", "AI_MindVal", "AI_AttackName",
                 "AI_AttackVal", "AI_MoveName", "AI_MoveVal", "AI_BattleRate", "AI_Priority",
-                "AI_HealRateA", "AI_HealRateB", "AI_BandNo", "AI_MoveLimit", "AI_Flag"
+                "AI_HealRateA", "AI_HealRateB", "AI_BandNo", "AI_MoveLimit", "AI_Flag",
+                "AI_Active", "AI_ActiveTurn", "AI_ActiveFlag"
             };
             return knownAttrs.Contains(name);
         }
@@ -357,6 +378,9 @@ namespace Editor
             element.SetAttribute("AI_BandNo", entry.AI_BandNo.ToString());
             element.SetAttribute("AI_MoveLimit", entry.AI_MoveLimit);
             element.SetAttribute("AI_Flag", entry.AI_Flag.ToString());
+            element.SetAttribute("AI_Active", entry.AI_Active ?? "");
+            element.SetAttribute("AI_ActiveTurn", entry.AI_ActiveTurn.ToString());
+            element.SetAttribute("AI_ActiveFlag", entry.AI_ActiveFlag ?? "");
             
             foreach (var kvp in entry.GetAllAdditionalAttributes())
             {

@@ -6,17 +6,27 @@ namespace Editor
 {
     public class DisposSceneRenderer
     {
+        // Fallback visual when no icon is available
+        private static Texture2D _fallbackTex;
+        private static Sprite _fallbackSprite;
+
         private Dictionary<DisposEntry, GameObject> unitObjects = new Dictionary<DisposEntry, GameObject>();
+        private Dictionary<DisposGroup, GameObject> groupObjects = new Dictionary<DisposGroup, GameObject>();
+        private Dictionary<DisposEntry, DisposTool.DisposUnitComponent> entryToComponent = new Dictionary<DisposEntry, DisposTool.DisposUnitComponent>();
+        // Legacy root container (unused in immediate-mode)
         private GameObject rootContainer;
         private DisposDocument currentDocument;
         private Bridge.MapTerrain currentTerrain;
         private const float TILE_SIZE = 5.0f; // Match TerrainPaintToolWindow
+        private const float GROUND_LIFT = 0.15f; // lift above surfaces to avoid clipping
         private bool showGrid = true;
         private bool showLabels = true;
         private bool showDirections = true;
         private bool showIcons = true;
         private DisposEntry selectedEntry;
         private Vector3 worldOffset = Vector3.zero;
+        private const float LABEL_SCREEN_OFFSET_Y = 22f; // pixels above sprite
+        private const float ICON_TILE_SCALE = 0.9f;      // fraction of tile used for icon size
         
         public DisposEntry SelectedEntry
         {
@@ -31,23 +41,12 @@ namespace Editor
             }
         }
         
-        public void Initialize()
-        {
-            if (rootContainer == null)
-            {
-                rootContainer = new GameObject("DisposTool_Units");
-                rootContainer.hideFlags = HideFlags.HideAndDontSave;
-            }
-        }
+        public void Initialize() { }
         
         public void Cleanup()
         {
             ClearAllUnits();
-            if (rootContainer != null)
-            {
-                GameObject.DestroyImmediate(rootContainer);
-                rootContainer = null;
-            }
+            ClearAllGroups();
         }
         
         public void RenderDocument(DisposDocument document, Bridge.MapTerrain terrain = null)
@@ -59,77 +58,38 @@ namespace Editor
             }
             
             currentDocument = document;
-            currentTerrain = terrain;
+            if (terrain != null)
+                currentTerrain = terrain;
             RefreshUnits();
         }
         
         private void RefreshUnits()
         {
+            Debug.Log($"RefreshUnits called. Document: {currentDocument != null}, Groups: {currentDocument?.Groups?.Count ?? 0}");
+            
             ClearAllUnits();
+            ClearAllGroups();
             
             if (currentDocument == null)
+            {
+                Debug.LogWarning("No document to refresh");
                 return;
+            }
             
+            // Immediate-mode: nothing to instantiate
+            int entries = 0;
             foreach (var group in currentDocument.Groups)
             {
-                if (!group.IsVisible)
-                    continue;
-                
+                if (!group.IsVisible) continue;
                 foreach (var entry in group.Entries)
-                {
-                    if (!entry.IsGroupHeader)
-                    {
-                        CreateUnitObject(entry);
-                    }
-                }
+                    if (!entry.IsGroupHeader) entries++;
             }
+            Debug.Log($"RefreshUnits immediate-mode. Entries visible: {entries}");
         }
         
-        private void CreateUnitObject(DisposEntry entry)
-        {
-            if (entry == null || entry.IsGroupHeader)
-                return;
-            
-            GameObject unitObj = GameObject.CreatePrimitive(PrimitiveType.Quad);
-            unitObj.name = $"Unit_{entry.Pid}";
-            unitObj.transform.parent = rootContainer.transform;
-            unitObj.hideFlags = HideFlags.HideAndDontSave;
-            
-            // Calculate world position based on terrain origin and tile size
-            float startX = currentTerrain != null ? currentTerrain.m_X : 0;
-            float startZ = currentTerrain != null ? currentTerrain.m_Z : 0;
-            float worldX = startX + entry.DisposX * TILE_SIZE + TILE_SIZE * 0.5f;
-            float worldZ = startZ + entry.DisposY * TILE_SIZE + TILE_SIZE * 0.5f;
-            float worldY = worldOffset.y + 0.1f; // Slightly above terrain
-            
-            Vector3 position = new Vector3(worldX, worldY, worldZ);
-            unitObj.transform.position = position;
-            unitObj.transform.rotation = Quaternion.Euler(90, 0, 0);
-            unitObj.transform.localScale = Vector3.one * TILE_SIZE * 0.7f; // Slightly smaller than tile
-            
-            MeshRenderer renderer = unitObj.GetComponent<MeshRenderer>();
-            if (renderer != null)
-            {
-                Material mat = new Material(Shader.Find("Sprites/Default"));
-                mat.hideFlags = HideFlags.HideAndDontSave;
-                
-                Texture2D icon = DisposDataLoader.Instance.GetUnitIcon(entry);
-                if (icon != null && showIcons)
-                {
-                    mat.mainTexture = icon;
-                    mat.color = Color.white;
-                }
-                else
-                {
-                    mat.color = DisposDataLoader.Instance.GetForceColor(entry.Force);
-                }
-                
-                renderer.material = mat;
-                renderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
-            }
-            
-            unitObjects[entry] = unitObj;
-        }
+        private GameObject CreateGroupObject(DisposGroup group) { return null; }
+        
+        private void CreateUnitObject(DisposEntry entry, GameObject parentGroup) { }
         
         private void ClearAllUnits()
         {
@@ -141,6 +101,19 @@ namespace Editor
                 }
             }
             unitObjects.Clear();
+            entryToComponent.Clear();
+        }
+        
+        private void ClearAllGroups()
+        {
+            foreach (var kvp in groupObjects)
+            {
+                if (kvp.Value != null)
+                {
+                    GameObject.DestroyImmediate(kvp.Value);
+                }
+            }
+            groupObjects.Clear();
         }
         
         public void DrawSceneGUI()
@@ -151,6 +124,9 @@ namespace Editor
             if (showGrid)
                 DrawGrid();
             
+            var prevZTest = Handles.zTest;
+            Handles.zTest = UnityEngine.Rendering.CompareFunction.Always;
+
             foreach (var group in currentDocument.Groups)
             {
                 if (!group.IsVisible)
@@ -160,10 +136,13 @@ namespace Editor
                 {
                     if (!entry.IsGroupHeader)
                     {
+                        DrawUnitPlate(entry);
                         DrawUnitGUI(entry);
                     }
                 }
             }
+
+            Handles.zTest = prevZTest;
         }
         
         private void DrawGrid()
@@ -203,8 +182,39 @@ namespace Editor
             float startZ = currentTerrain != null ? currentTerrain.m_Z : 0;
             float worldX = startX + entry.DisposX * TILE_SIZE + TILE_SIZE * 0.5f;
             float worldZ = startZ + entry.DisposY * TILE_SIZE + TILE_SIZE * 0.5f;
-            Vector3 worldPos = new Vector3(worldX, worldOffset.y, worldZ);
-            
+            Vector3 worldPos = new Vector3(worldX, worldOffset.y + 0.02f, worldZ);
+
+            // Screen-space icon overlay sized to tile
+            if (showIcons)
+            {
+                Texture2D icon = DisposDataLoader.Instance.GetUnitIcon(entry);
+                if (icon != null)
+                {
+                    float tileX = startX + entry.DisposX * TILE_SIZE;
+                    float tileZ = startZ + entry.DisposY * TILE_SIZE;
+                    Vector3 blW = new Vector3(tileX, worldPos.y, tileZ);
+                    Vector3 brW = new Vector3(tileX + TILE_SIZE, worldPos.y, tileZ);
+                    Vector3 tlW = new Vector3(tileX, worldPos.y, tileZ + TILE_SIZE);
+
+                    Vector2 bl = HandleUtility.WorldToGUIPoint(blW);
+                    Vector2 br = HandleUtility.WorldToGUIPoint(brW);
+                    Vector2 tl = HandleUtility.WorldToGUIPoint(tlW);
+
+                    float tileWidthPx = (br - bl).magnitude;
+                    float tileHeightPx = (tl - bl).magnitude;
+                    float size = Mathf.Min(tileWidthPx, tileHeightPx) * ICON_TILE_SCALE;
+
+                    Vector2 center = HandleUtility.WorldToGUIPoint(worldPos);
+                    Rect iconRect = new Rect(center.x - size * 0.5f, center.y - size * 0.5f, size, size);
+
+                    Handles.BeginGUI();
+                    GUI.DrawTexture(iconRect, icon, ScaleMode.ScaleToFit, true);
+                    Handles.EndGUI();
+                }
+            }
+
+            // No visible handle; dragging is handled by DisposToolWindow input over tiles/icons
+
             if (showDirections && entry.Direction >= 0 && entry.Direction <= 8)
             {
                 DrawDirectionArrow(worldPos, entry.Direction);
@@ -225,6 +235,8 @@ namespace Editor
                 
                 Handles.BeginGUI();
                 Vector3 screenPos = HandleUtility.WorldToGUIPoint(labelPos);
+                // Offset label upward in screen space so it doesn't cover sprite
+                screenPos.y -= LABEL_SCREEN_OFFSET_Y;
                 
                 Vector2 labelSize = style.CalcSize(new GUIContent(label));
                 Rect bgRect = new Rect(screenPos.x - labelSize.x/2 - 2, 
@@ -326,6 +338,54 @@ namespace Editor
             
             return null;
         }
+
+        // Screen-space hit test against a unit's tile rectangle (icon/plate area)
+        public DisposEntry GetEntryAtScreenPosition(Vector2 mouseGui)
+        {
+            if (currentTerrain == null || currentDocument == null)
+                return null;
+
+            float startX = currentTerrain.m_X + worldOffset.x;
+            float startZ = currentTerrain.m_Z + worldOffset.z;
+            float y = worldOffset.y + 0.02f;
+
+            DisposEntry best = null;
+            float bestDist = float.MaxValue;
+
+            foreach (var group in currentDocument.Groups)
+            {
+                if (!group.IsVisible) continue;
+                foreach (var entry in group.Entries)
+                {
+                    if (entry.IsGroupHeader) continue;
+
+                    float tileX = startX + entry.DisposX * TILE_SIZE;
+                    float tileZ = startZ + entry.DisposY * TILE_SIZE;
+                    Vector2 p0 = HandleUtility.WorldToGUIPoint(new Vector3(tileX, y, tileZ));
+                    Vector2 p1 = HandleUtility.WorldToGUIPoint(new Vector3(tileX + TILE_SIZE, y, tileZ));
+                    Vector2 p2 = HandleUtility.WorldToGUIPoint(new Vector3(tileX + TILE_SIZE, y, tileZ + TILE_SIZE));
+                    Vector2 p3 = HandleUtility.WorldToGUIPoint(new Vector3(tileX, y, tileZ + TILE_SIZE));
+                    float minX = Mathf.Min(Mathf.Min(p0.x, p1.x), Mathf.Min(p2.x, p3.x));
+                    float maxX = Mathf.Max(Mathf.Max(p0.x, p1.x), Mathf.Max(p2.x, p3.x));
+                    float minY = Mathf.Min(Mathf.Min(p0.y, p1.y), Mathf.Min(p2.y, p3.y));
+                    float maxY = Mathf.Max(Mathf.Max(p0.y, p1.y), Mathf.Max(p2.y, p3.y));
+                    Rect r = new Rect(minX, minY, maxX - minX, maxY - minY);
+
+                    if (r.Contains(mouseGui))
+                    {
+                        // Prefer the closest tile center in screen space when overlapping
+                        Vector2 center = HandleUtility.WorldToGUIPoint(new Vector3(tileX + TILE_SIZE * 0.5f, y, tileZ + TILE_SIZE * 0.5f));
+                        float d = (center - mouseGui).sqrMagnitude;
+                        if (d < bestDist)
+                        {
+                            bestDist = d;
+                            best = entry;
+                        }
+                    }
+                }
+            }
+            return best;
+        }
         
         public void MoveEntry(DisposEntry entry, Vector3 worldPos)
         {
@@ -334,19 +394,44 @@ namespace Editor
             
             float startX = currentTerrain.m_X + worldOffset.x;
             float startZ = currentTerrain.m_Z + worldOffset.z;
-            
             int newX = Mathf.FloorToInt((worldPos.x - startX) / TILE_SIZE);
             int newY = Mathf.FloorToInt((worldPos.z - startZ) / TILE_SIZE);
-            
             entry.DisposX = newX;
             entry.DisposY = newY;
-            
-            if (unitObjects.TryGetValue(entry, out GameObject unitObj))
+        }
+
+        public void NudgeEntry(DisposEntry entry, int dx, int dy)
+        {
+            if (entry == null || entry.IsGroupHeader || currentTerrain == null)
+                return;
+            int width = currentTerrain.m_Width;
+            int height = currentTerrain.m_Height;
+            int nx = Mathf.Clamp(entry.DisposX + dx, 0, Mathf.Max(0, width - 1));
+            int ny = Mathf.Clamp(entry.DisposY + dy, 0, Mathf.Max(0, height - 1));
+            if (nx == entry.DisposX && ny == entry.DisposY)
+                return;
+            entry.DisposX = nx;
+            entry.DisposY = ny;
+            SceneView.RepaintAll();
+        }
+
+        private void DrawUnitPlate(DisposEntry entry)
+        {
+            if (currentTerrain == null) return;
+            float startX = currentTerrain.m_X + worldOffset.x;
+            float startZ = currentTerrain.m_Z + worldOffset.z;
+            float y = worldOffset.y + 0.02f;
+            float tileX = startX + entry.DisposX * TILE_SIZE;
+            float tileZ = startZ + entry.DisposY * TILE_SIZE;
+            Vector3[] verts = new Vector3[]
             {
-                float worldX = startX + newX * TILE_SIZE + TILE_SIZE * 0.5f;
-                float worldZ = startZ + newY * TILE_SIZE + TILE_SIZE * 0.5f;
-                unitObj.transform.position = new Vector3(worldX, worldOffset.y + 0.1f, worldZ);
-            }
+                new Vector3(tileX, y, tileZ),
+                new Vector3(tileX + TILE_SIZE, y, tileZ),
+                new Vector3(tileX + TILE_SIZE, y, tileZ + TILE_SIZE),
+                new Vector3(tileX, y, tileZ + TILE_SIZE)
+            };
+            Color c = DisposDataLoader.Instance.GetForceColor(entry.Force);
+            Handles.DrawSolidRectangleWithOutline(verts, c, Color.black);
         }
         
         private void UpdateSelection()
@@ -375,8 +460,106 @@ namespace Editor
         public void SetShowIcons(bool show)
         {
             showIcons = show;
-            RefreshUnits();
+            UpdateUnitVisuals();
             SceneView.RepaintAll();
+        }
+        
+        private void UpdateUnitVisuals()
+        {
+            foreach (var kvp in unitObjects)
+            {
+                if (kvp.Value != null && kvp.Key != null)
+                {
+                    UpdateUnitSprite(kvp.Value, kvp.Key);
+                }
+            }
+        }
+        
+        private void UpdateUnitSprite(GameObject unitObj, DisposEntry entry)
+        {
+            // Icon renderer lives on the Visual child
+            SpriteRenderer renderer = null;
+            var visual = unitObj.transform.Find("Visual");
+            if (visual != null) renderer = visual.GetComponent<SpriteRenderer>();
+            if (renderer != null)
+            {
+                Texture2D icon = DisposDataLoader.Instance.GetUnitIcon(entry);
+                if (icon != null && showIcons)
+                {
+                    // Center pivot for flat-on-ground sprites
+                    Sprite sprite = Sprite.Create(icon, 
+                        new Rect(0, 0, icon.width, icon.height), 
+                        new Vector2(0.5f, 0.5f), 
+                        Mathf.Max(icon.width, icon.height));
+                    renderer.sprite = sprite;
+                    renderer.color = Color.white;
+                }
+                else
+                {
+                    // Ensure a visible fallback marker
+                    EnsureFallbackSprite();
+                    renderer.sprite = _fallbackSprite;
+                    renderer.color = DisposDataLoader.Instance.GetForceColor(entry.Force);
+                }
+            }
+
+            // Update opaque under-plate color beneath the icon
+            Transform plate = unitObj.transform.Find("Visual/UnitPlate");
+            if (plate != null)
+            {
+                var plateRenderer = plate.GetComponent<SpriteRenderer>();
+                if (plateRenderer != null)
+                {
+                    plateRenderer.color = DisposDataLoader.Instance.GetForceColor(entry.Force);
+                    ApplyOverlayMaterial(plateRenderer);
+                    plateRenderer.sortingOrder = 9999;
+                }
+            }
+        }
+
+        private static void EnsureFallbackSprite()
+        {
+            if (_fallbackSprite != null)
+                return;
+            if (_fallbackTex == null)
+            {
+                _fallbackTex = new Texture2D(2, 2, TextureFormat.RGBA32, false)
+                {
+                    name = "DisposUnit_FallbackTex"
+                };
+                // Fill with white
+                var cols = new Color[4] { Color.white, Color.white, Color.white, Color.white };
+                _fallbackTex.SetPixels(cols);
+                _fallbackTex.Apply();
+            }
+            // Center pivot for flat-on-ground sprites
+            _fallbackSprite = Sprite.Create(_fallbackTex, new Rect(0, 0, _fallbackTex.width, _fallbackTex.height), new Vector2(0.5f, 0.5f), 2f);
+            _fallbackSprite.name = "DisposUnit_FallbackSprite";
+        }
+
+        private float GetGroundYAt(float worldX, float worldZ, float defaultY)
+        {
+            // Raycast disabled; keep a fixed lifted height above base
+            return worldOffset.y + GROUND_LIFT;
+        }
+
+        private static Material _overlayMat;
+        private static void ApplyOverlayMaterial(SpriteRenderer r)
+        {
+            if (_overlayMat == null)
+            {
+                var sh = Shader.Find("Dispos/SpriteOverlayAlways");
+                if (sh != null)
+                {
+                    _overlayMat = new Material(sh);
+                    _overlayMat.name = "Dispos_SpriteOverlayAlways_Material";
+                    _overlayMat.hideFlags = HideFlags.HideAndDontSave;
+                }
+            }
+            if (_overlayMat != null)
+            {
+                r.sharedMaterial = _overlayMat;
+            }
         }
         
         public void SetWorldOffset(Vector3 offset)
@@ -384,6 +567,11 @@ namespace Editor
             worldOffset = offset;
             RefreshUnits();
             SceneView.RepaintAll();
+        }
+
+        public float GetBasePlaneY()
+        {
+            return worldOffset.y;
         }
     }
 }

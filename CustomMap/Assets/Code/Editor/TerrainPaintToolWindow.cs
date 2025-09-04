@@ -165,6 +165,8 @@ namespace Editor
     public class TerrainPaintToolWindow : EditorWindow
     {
         private static TerrainPaintToolWindow instance;
+        // External tools (e.g., Dispos tool) can lock painting while keeping visualization
+        private static bool externalInteractionLock = false;
         private static MapTerrain selectedTerrain;
         private static bool visualizationEnabled = true;
         private static bool showGridLines = true;
@@ -311,6 +313,12 @@ namespace Editor
         {
             instance = GetWindow<TerrainPaintToolWindow>("Terrain Paint Tool");
             instance.minSize = new Vector2(300, 400);
+        }
+
+        // Called by other editor tools to prevent terrain edits while keeping colors visible
+        public static void SetExternalInteractionLocked(bool locked)
+        {
+            externalInteractionLock = locked;
         }
         
         private void OnEnable()
@@ -1721,6 +1729,17 @@ namespace Editor
         private static void HandleMouseInput(int width, int height, float startX, float startZ, float y)
         {
             Event currentEvent = Event.current;
+            if (externalInteractionLock)
+            {
+                // Suppress hover and painting while another tool (Dispos) is active
+                isMouseOverGrid = false;
+                hoveredTile = new Vector2Int(-1, -1);
+                if (isPaintingStroke)
+                {
+                    EndPaintStroke();
+                }
+                return;
+            }
             Vector2Int prevHovered = hoveredTile;
             bool prevOver = isMouseOverGrid;
             
@@ -1748,7 +1767,7 @@ namespace Editor
                 isMouseOverGrid = true;
                 
                 // Only handle painting clicks when in paint mode
-                if (paintMode)
+                if (paintMode && !externalInteractionLock)
                 {
                     // Handle mouse clicks
                     if (currentEvent.type == EventType.MouseDown || currentEvent.type == EventType.MouseDrag || currentEvent.type == EventType.MouseUp)

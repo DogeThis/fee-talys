@@ -8,6 +8,9 @@ namespace Editor
 {
     public class DisposToolWindow : EditorWindow
     {
+        private static DisposToolWindow instance;
+        public static DisposToolWindow Instance => instance;
+        
         private DisposDocument currentDocument;
         private DisposSceneRenderer sceneRenderer;
         private DisposEntry selectedEntry;
@@ -31,6 +34,10 @@ namespace Editor
         
         private bool isDraggingUnit = false;
         private DisposEntry draggedEntry = null;
+        private bool documentIsDirty = false;
+
+        private enum DisposOverlayMode { Hide, Show, Edit }
+        private DisposOverlayMode overlayMode = DisposOverlayMode.Edit;
         
         [MenuItem("Window/Dispos Tool")]
         public static void ShowWindow()
@@ -41,10 +48,23 @@ namespace Editor
         
         private void OnEnable()
         {
+            instance = this;
+            
             sceneRenderer = new DisposSceneRenderer();
             sceneRenderer.Initialize();
             
             SceneView.duringSceneGui += OnSceneGUI;
+            Selection.selectionChanged += OnSelectionChanged;
+
+            // Try to ensure our scene GUI draws after others
+            EditorApplication.delayCall += () =>
+            {
+                SceneView.duringSceneGui -= OnSceneGUI;
+                SceneView.duringSceneGui += OnSceneGUI;
+            };
+
+            // Reflect current overlay mode in TerrainPaint tool
+            TerrainPaintToolWindow.SetExternalInteractionLocked(overlayMode == DisposOverlayMode.Edit);
             
             RefreshFileList();
             
@@ -56,8 +76,17 @@ namespace Editor
         
         private void OnDisable()
         {
-            SceneView.duringSceneGui -= OnSceneGUI;
+            instance = null;
             
+            SceneView.duringSceneGui -= OnSceneGUI;
+            Selection.selectionChanged -= OnSelectionChanged;
+            
+            // Restore tools visibility
+            Tools.hidden = false;
+
+            // Release any external locks
+            TerrainPaintToolWindow.SetExternalInteractionLocked(false);
+
             if (sceneRenderer != null)
             {
                 sceneRenderer.Cleanup();
@@ -95,21 +124,66 @@ namespace Editor
                 DisposDataLoader.Instance.ReloadData();
                 if (currentDocument != null)
                 {
+                    Debug.Log("Reloading document in scene renderer");
                     sceneRenderer.RenderDocument(currentDocument, selectedTerrain);
                 }
             }
             
+            if (GUILayout.Button("Debug Refresh", EditorStyles.toolbarButton, GUILayout.Width(100)))
+            {
+                Debug.Log($"Debug: Document={currentDocument != null}, Terrain={selectedTerrain != null}");
+                if (currentDocument != null)
+                {
+                    Debug.Log($"Groups: {currentDocument.Groups.Count}");
+                    foreach (var group in currentDocument.Groups)
+                    {
+                        Debug.Log($"  Group {group.GroupName}: {group.Entries.Count} entries");
+                    }
+                }
+                sceneRenderer?.RenderDocument(currentDocument, selectedTerrain);
+            }
+            
+            if (currentDocument != null && documentIsDirty)
+            {
+                GUI.color = Color.yellow;
+                GUILayout.Label("[Modified]", EditorStyles.toolbarButton);
+                GUI.color = Color.white;
+            }
+            
             GUILayout.FlexibleSpace();
+
+            // Overlay mode: Hide / Show / Edit
+            EditorGUI.BeginChangeCheck();
+            var modeNames = new[] { "Hide", "Show", "Edit" };
+            int newMode = EditorGUILayout.Popup((int)overlayMode, modeNames, EditorStyles.toolbarPopup, GUILayout.Width(80));
+            if (EditorGUI.EndChangeCheck())
+            {
+                overlayMode = (DisposOverlayMode)newMode;
+                TerrainPaintToolWindow.SetExternalInteractionLocked(overlayMode == DisposOverlayMode.Edit);
+                if (overlayMode == DisposOverlayMode.Hide)
+                {
+                    // Clear visuals when hidden
+                    sceneRenderer.Cleanup();
+                }
+                else if (currentDocument != null)
+                {
+                    sceneRenderer.RenderDocument(currentDocument, selectedTerrain);
+                }
+                SceneView.RepaintAll();
+            }
             
             showGrid = GUILayout.Toggle(showGrid, "Grid", EditorStyles.toolbarButton, GUILayout.Width(50));
             showLabels = GUILayout.Toggle(showLabels, "Labels", EditorStyles.toolbarButton, GUILayout.Width(50));
             showDirections = GUILayout.Toggle(showDirections, "Directions", EditorStyles.toolbarButton, GUILayout.Width(70));
             showIcons = GUILayout.Toggle(showIcons, "Icons", EditorStyles.toolbarButton, GUILayout.Width(50));
             
-            if (currentDocument != null && GUILayout.Button("Save", EditorStyles.toolbarButton, GUILayout.Width(60)))
+            GUI.enabled = currentDocument != null && documentIsDirty;
+            if (GUILayout.Button("Save", EditorStyles.toolbarButton, GUILayout.Width(60)))
             {
                 SaveDocument();
+                documentIsDirty = false;
             }
+            GUI.enabled = true;
             
             EditorGUILayout.EndHorizontal();
             
@@ -379,8 +453,20 @@ namespace Editor
         {
             if (sceneRenderer != null && currentDocument != null)
             {
-                sceneRenderer.DrawSceneGUI();
-                HandleSceneInput();
+                if (overlayMode != DisposOverlayMode.Hide)
+                {
+                    sceneRenderer.DrawSceneGUI();
+                    if (overlayMode == DisposOverlayMode.Edit)
+                    {
+                        HandleSceneInput();
+                    }
+                }
+
+                // Disable default transform handles when a Dispos unit is selected
+                GameObject active = Selection.activeGameObject;
+                bool isUnit = active != null && active.GetComponent<DisposTool.DisposUnitComponent>() != null;
+                Tools.hidden = isUnit || overlayMode == DisposOverlayMode.Edit;
+                if (Tools.hidden) Tools.current = Tool.None;
             }
         }
         
@@ -388,57 +474,52 @@ namespace Editor
         {
             Event e = Event.current;
             
+            // Keyboard nudging disabled per request; movement via drag handle only
+
+            // Claim mouse focus to make icon dragging reliable in Edit mode
+            if (e.type == EventType.Layout)
+            {
+                HandleUtility.AddDefaultControl(GUIUtility.GetControlID(FocusType.Passive));
+            }
+
             if (e.type == EventType.MouseDown && e.button == 0)
             {
-                Ray ray = HandleUtility.GUIPointToWorldRay(e.mousePosition);
-                if (Physics.Raycast(ray, out RaycastHit hit, 1000f))
+                // First try screen-space hit test against icon/plate
+                var entry = sceneRenderer.GetEntryAtScreenPosition(e.mousePosition);
+                if (entry == null)
                 {
-                    var entry = sceneRenderer.GetEntryAtPosition(hit.point);
-                    if (entry != null)
-                    {
-                        SelectEntry(entry);
-                        
-                        if (!e.shift)
-                        {
-                            isDraggingUnit = true;
-                            draggedEntry = entry;
-                        }
-                        
-                        e.Use();
-                    }
-                }
-                else
-                {
-                    float planeY = 0;
+                    // Fallback to plane-space tile hit
+                    Ray ray = HandleUtility.GUIPointToWorldRay(e.mousePosition);
+                    float planeY = sceneRenderer != null ? sceneRenderer.GetBasePlaneY() : 0f;
                     float distance = (planeY - ray.origin.y) / ray.direction.y;
                     if (distance > 0)
                     {
                         Vector3 worldPos = ray.origin + ray.direction * distance;
-                        var entry = sceneRenderer.GetEntryAtPosition(worldPos);
-                        if (entry != null)
-                        {
-                            SelectEntry(entry);
-                            
-                            if (!e.shift)
-                            {
-                                isDraggingUnit = true;
-                                draggedEntry = entry;
-                            }
-                            
-                            e.Use();
-                        }
+                        entry = sceneRenderer.GetEntryAtPosition(worldPos);
                     }
+                }
+
+                if (entry != null)
+                {
+                    SelectEntry(entry);
+                    if (!e.shift)
+                    {
+                        isDraggingUnit = true;
+                        draggedEntry = entry;
+                    }
+                    e.Use();
                 }
             }
             else if (e.type == EventType.MouseDrag && isDraggingUnit && draggedEntry != null)
             {
                 Ray ray = HandleUtility.GUIPointToWorldRay(e.mousePosition);
-                float planeY = 0;
+                float planeY = sceneRenderer != null ? sceneRenderer.GetBasePlaneY() : 0f;
                 float distance = (planeY - ray.origin.y) / ray.direction.y;
                 if (distance > 0)
                 {
                     Vector3 worldPos = ray.origin + ray.direction * distance;
                     sceneRenderer.MoveEntry(draggedEntry, worldPos);
+                    documentIsDirty = true;
                     Repaint();
                     e.Use();
                 }
@@ -481,6 +562,7 @@ namespace Editor
             string filePath = Path.Combine(disposFolderPath, availableFiles[index]);
             
             currentDocument = DisposDocument.LoadFromFile(filePath);
+            documentIsDirty = false;
             
             if (currentDocument != null && sceneRenderer != null)
             {
@@ -499,14 +581,107 @@ namespace Editor
             if (currentDocument != null)
             {
                 currentDocument.SaveToFile();
+                documentIsDirty = false;
                 EditorUtility.DisplayDialog("Save Complete", "Dispos file saved successfully.", "OK");
             }
+        }
+        
+        public void NotifyUnitMoved(GameObject unitObj)
+        {
+            if (unitObj != null)
+            {
+                DisposTool.DisposUnitComponent component = unitObj.GetComponent<DisposTool.DisposUnitComponent>();
+                if (component != null)
+                {
+                    DisposEntry entry = FindEntryByComponent(component);
+                    if (entry != null)
+                    {
+                        entry.DisposX = component.disposX;
+                        entry.DisposY = component.disposY;
+                        MarkDocumentDirty();
+                    }
+                }
+            }
+        }
+        
+        public void MarkDocumentDirty()
+        {
+            documentIsDirty = true;
+            Repaint();
+        }
+        
+        private void OnSelectionChanged()
+        {
+            GameObject selected = Selection.activeGameObject;
+            if (selected != null)
+            {
+                DisposTool.DisposUnitComponent unitComponent = selected.GetComponent<DisposTool.DisposUnitComponent>();
+                if (unitComponent != null)
+                {
+                    // Find the entry that matches this component
+                    DisposEntry matchingEntry = FindEntryByComponent(unitComponent);
+                    if (matchingEntry != null)
+                    {
+                        SelectEntry(matchingEntry);
+                        return;
+                    }
+                }
+                
+                DisposTool.DisposGroupComponent groupComponent = selected.GetComponent<DisposTool.DisposGroupComponent>();
+                if (groupComponent != null)
+                {
+                    // Could highlight group in list if needed
+                    selectedEntry = null;
+                    sceneRenderer.SelectedEntry = null;
+                    Repaint();
+                }
+            }
+        }
+        
+        public DisposEntry FindEntryByComponent(DisposTool.DisposUnitComponent component)
+        {
+            if (currentDocument == null || component == null)
+                return null;
+                
+            foreach (var group in currentDocument.Groups)
+            {
+                foreach (var entry in group.Entries)
+                {
+                    if (!entry.IsGroupHeader && 
+                        entry.Pid == component.unitPid && 
+                        entry.DisposX == component.disposX && 
+                        entry.DisposY == component.disposY)
+                    {
+                        return entry;
+                    }
+                }
+            }
+            return null;
         }
         
         private void SelectEntry(DisposEntry entry)
         {
             selectedEntry = entry;
             sceneRenderer.SelectedEntry = entry;
+            
+            // Find and select the corresponding GameObject
+            if (entry != null)
+            {
+                GameObject[] allObjects = FindObjectsOfType<GameObject>();
+                foreach (GameObject obj in allObjects)
+                {
+                    DisposTool.DisposUnitComponent unitComponent = obj.GetComponent<DisposTool.DisposUnitComponent>();
+                    if (unitComponent != null && 
+                        unitComponent.unitPid == entry.Pid &&
+                        unitComponent.disposX == entry.DisposX &&
+                        unitComponent.disposY == entry.DisposY)
+                    {
+                        Selection.activeGameObject = obj;
+                        SceneView.lastActiveSceneView?.Frame(new Bounds(obj.transform.position, Vector3.one * 10f), false);
+                        break;
+                    }
+                }
+            }
             Repaint();
         }
         
