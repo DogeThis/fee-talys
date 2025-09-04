@@ -6,6 +6,23 @@ using UnityEngine;
 
 namespace Editor
 {
+    [System.Flags]
+    public enum DisposFlags
+    {
+        Normal = 1,
+        Hard = 2,
+        Lunatic = 4,
+        Create = 8,
+        Leader = 16,
+        NotMove = 32,
+        Edge = 64,
+        Pos = 128,
+        Must = 256,
+        Fix = 512,
+        Guest = 1024,
+        MaskSortie = 896,       // Pos | Must | Fix
+        MaskDifficulty = 7      // Normal | Hard | Lunatic
+    }
     [Serializable]
     public class DisposEntry
     {

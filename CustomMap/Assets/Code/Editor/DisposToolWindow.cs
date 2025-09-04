@@ -412,12 +412,49 @@ namespace Editor
             entry.AI_BattleRate = EditorGUILayout.TextField("Battle Rate", entry.AI_BattleRate);
             entry.AI_Priority = EditorGUILayout.IntField("Priority", entry.AI_Priority);
             entry.AI_BandNo = EditorGUILayout.IntField("Band No", entry.AI_BandNo);
-            
+
+            EditorGUILayout.Space();
+            EditorGUILayout.LabelField("Flags", EditorStyles.boldLabel);
+            // Show numeric view
+            EditorGUILayout.LabelField($"Value: {entry.Flag} (0x{entry.Flag:X})", EditorStyles.miniLabel);
+
+            // Difficulty flags
+            EditorGUILayout.LabelField("Difficulty", EditorStyles.miniBoldLabel);
+            entry.Flag = DrawFlagToggle(entry.Flag, "Normal", (int)DisposFlags.Normal);
+            entry.Flag = DrawFlagToggle(entry.Flag, "Hard", (int)DisposFlags.Hard);
+            entry.Flag = DrawFlagToggle(entry.Flag, "Lunatic", (int)DisposFlags.Lunatic);
+
+            EditorGUILayout.Space(2);
+            EditorGUILayout.LabelField("Sortie Mask", EditorStyles.miniBoldLabel);
+            entry.Flag = DrawFlagToggle(entry.Flag, "Pos", (int)DisposFlags.Pos);
+            entry.Flag = DrawFlagToggle(entry.Flag, "Must", (int)DisposFlags.Must);
+            entry.Flag = DrawFlagToggle(entry.Flag, "Fix", (int)DisposFlags.Fix);
+
+            EditorGUILayout.Space(2);
+            EditorGUILayout.LabelField("Properties", EditorStyles.miniBoldLabel);
+            entry.Flag = DrawFlagToggle(entry.Flag, "Create", (int)DisposFlags.Create);
+            entry.Flag = DrawFlagToggle(entry.Flag, "Leader", (int)DisposFlags.Leader);
+            entry.Flag = DrawFlagToggle(entry.Flag, "Not Move", (int)DisposFlags.NotMove);
+            entry.Flag = DrawFlagToggle(entry.Flag, "Edge", (int)DisposFlags.Edge);
+            entry.Flag = DrawFlagToggle(entry.Flag, "Guest", (int)DisposFlags.Guest);
+
             if (EditorGUI.EndChangeCheck())
             {
                 sceneRenderer.RenderDocument(currentDocument);
                 SceneView.RepaintAll();
             }
+        }
+
+        private int DrawFlagToggle(int flags, string label, int bit)
+        {
+            bool has = (flags & bit) != 0;
+            bool newHas = EditorGUILayout.ToggleLeft(label, has);
+            if (newHas != has)
+            {
+                if (newHas) flags |= bit; else flags &= ~bit;
+                MarkDocumentDirty();
+            }
+            return flags;
         }
         
         private void DrawResizeHandle(ref bool isResizing, ref float panelWidth, bool isLeft)
