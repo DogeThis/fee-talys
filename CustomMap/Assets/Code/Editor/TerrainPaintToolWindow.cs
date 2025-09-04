@@ -371,7 +371,7 @@ namespace Editor
         {
             visualizationEnabled = EditorPrefs.GetBool(PREFS_ENABLED, true);
             showGridLines = EditorPrefs.GetBool(PREFS_SHOW_GRID, true);
-            textSize = EditorPrefs.GetFloat(PREFS_TEXT_SIZE, 0.5f);
+            textSize = EditorPrefs.GetFloat(PREFS_TEXT_SIZE, 1.5f);
             gridThickness = EditorPrefs.GetFloat(PREFS_GRID_THICKNESS, 1f);
             displayMode = (DisplayMode)EditorPrefs.GetInt(PREFS_DISPLAY_MODE, (int)DisplayMode.Both);
             colorOpacity = EditorPrefs.GetFloat(PREFS_COLOR_OPACITY, 0.5f);
@@ -579,7 +579,7 @@ namespace Editor
                     EditorGUILayout.Space(5);
                     EditorGUILayout.LabelField("Text", EditorStyles.miniBoldLabel);
                     textDisplayMode = (TextDisplayMode)EditorGUILayout.EnumPopup("Text Display", textDisplayMode);
-                    textSize = EditorGUILayout.Slider("Text Size", textSize, 0.1f, 2f);
+                    textSize = EditorGUILayout.Slider("Text Size", textSize, 0.1f, 3f);
                 }
 
                 if (EditorGUI.EndChangeCheck())
@@ -591,7 +591,7 @@ namespace Editor
                 EditorGUILayout.Space(10);
                 if (GUILayout.Button("Reset Display Settings"))
                 {
-                    textSize = 0.5f;
+                    textSize = 1.5f;
                     textColor = Color.white;
                     gridColor = new Color(1f, 1f, 1f, 0.3f);
                     gridThickness = 1f;
@@ -1003,6 +1003,13 @@ namespace Editor
                             currentHighlightRegion = tilesToHighlight;
                             highlightTerrainId = selectedBrushTerrain;
                         }
+                    }
+                    else if (paintMode && isSampling && !string.IsNullOrEmpty(hoveredTerrainIdForHighlight))
+                    {
+                        // While sampling in paint mode, highlight the hovered tile itself
+                        // so it looks like the tile we'd paint with if picked.
+                        currentHighlightRegion = new HashSet<Vector2Int> { hoveredTile };
+                        highlightTerrainId = hoveredTerrainIdForHighlight;
                     }
                     else if (!paintMode && !string.IsNullOrEmpty(hoveredTerrainIdForHighlight))
                     {
@@ -1566,7 +1573,7 @@ namespace Editor
             
             if (isSampling)
             {
-                // Draw sampling indicator - single tile with different color
+                // Draw sampling indicator - single tile showing the color that would be sampled
                 float worldX = startX + centerTile.x * TILE_SIZE;
                 float worldZ = startZ + centerTile.y * TILE_SIZE;
                 
@@ -1578,9 +1585,73 @@ namespace Editor
                     new Vector3(worldX, y + 0.05f, worldZ + TILE_SIZE)
                 };
                 
-                // Cyan color for sampling mode
-                Color sampleColor = new Color(0f, 1f, 1f, 0.5f);
-                Handles.DrawSolidRectangleWithOutline(verts, sampleColor, Color.cyan);
+                // Get the actual terrain color at the hovered tile
+                // This should match EXACTLY how the tiles are displayed on the map (with brightness adjustment)
+                Color sampleColor = Color.gray;
+                Color sampleOutline = Color.gray;
+                if (selectedTerrain != null && terrainDatabase != null)
+                {
+                    int index = centerTile.y * width + centerTile.x;
+                    if (index >= 0 && index < selectedTerrain.m_Terrains.Length)
+                    {
+                        string terrainToSample = selectedTerrain.m_Terrains[index];
+                        if (!string.IsNullOrEmpty(terrainToSample))
+                        {
+                            // Debug: Log what we're sampling
+                            Debug.Log($"Sampling at ({centerTile.x}, {centerTile.y}): {terrainToSample}");
+                            
+                            // Get base color from database
+                            Color terrainColor = terrainDatabase.GetTerrainColor(terrainToSample, Color.gray);
+                            
+                            // Apply brightness adjustment (same as actual tile rendering)
+                            terrainColor.r = Mathf.Clamp01(terrainColor.r * colorBrightness);
+                            terrainColor.g = Mathf.Clamp01(terrainColor.g * colorBrightness);
+                            terrainColor.b = Mathf.Clamp01(terrainColor.b * colorBrightness);
+                            
+                            // Now create preview colors
+                            sampleColor = new Color(terrainColor.r, terrainColor.g, terrainColor.b, 0.4f);
+                            // Darken the adjusted color for the outline
+                            sampleOutline = new Color(
+                                terrainColor.r * 0.6f,
+                                terrainColor.g * 0.6f,
+                                terrainColor.b * 0.6f,
+                                0.8f
+                            );
+                        }
+                    }
+                }
+                Handles.DrawSolidRectangleWithOutline(verts, sampleColor, sampleOutline);
+                
+                // Draw "Sample" text over the tile
+                Vector3 tileCenter = new Vector3(worldX + TILE_SIZE * 0.5f, y + 0.1f, worldZ + TILE_SIZE * 0.5f);
+                Vector2 guiPos = HandleUtility.WorldToGUIPoint(tileCenter);
+                
+                Handles.BeginGUI();
+                GUIStyle sampleStyle = new GUIStyle(EditorStyles.boldLabel);
+                sampleStyle.alignment = TextAnchor.MiddleCenter;
+                sampleStyle.normal.textColor = Color.white;
+                sampleStyle.fontSize = 12;
+                
+                // Draw text with black outline for visibility
+                Rect textRect = new Rect(guiPos.x - 30, guiPos.y - 10, 60, 20);
+                
+                // Draw outline
+                sampleStyle.normal.textColor = Color.black;
+                for (int dx = -1; dx <= 1; dx++)
+                {
+                    for (int dy = -1; dy <= 1; dy++)
+                    {
+                        if (dx != 0 || dy != 0)
+                        {
+                            GUI.Label(new Rect(textRect.x + dx, textRect.y + dy, textRect.width, textRect.height), "Sample", sampleStyle);
+                        }
+                    }
+                }
+                
+                // Draw main text
+                sampleStyle.normal.textColor = Color.white;
+                GUI.Label(textRect, "Sample", sampleStyle);
+                Handles.EndGUI();
             }
             else
             {
@@ -1596,10 +1667,15 @@ namespace Editor
                     // Get the actual color of the terrain we're painting
                     Color terrainColor = terrainDatabase.GetTerrainColor(selectedBrushTerrain, Color.gray);
                     
+                    // Apply brightness adjustment (same as actual tile rendering)
+                    terrainColor.r = Mathf.Clamp01(terrainColor.r * colorBrightness);
+                    terrainColor.g = Mathf.Clamp01(terrainColor.g * colorBrightness);
+                    terrainColor.b = Mathf.Clamp01(terrainColor.b * colorBrightness);
+                    
                     // Make it semi-transparent for preview
                     Color previewColor = new Color(terrainColor.r, terrainColor.g, terrainColor.b, 0.4f);
                     
-                    // Darken the color for the outline
+                    // Darken the adjusted color for the outline
                     Color outlineColor = new Color(
                         terrainColor.r * 0.6f,
                         terrainColor.g * 0.6f,
