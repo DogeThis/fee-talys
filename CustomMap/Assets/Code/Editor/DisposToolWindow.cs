@@ -15,6 +15,7 @@ namespace Editor
         private DisposSceneRenderer sceneRenderer;
         private DisposEntry selectedEntry;
         private Bridge.MapTerrain selectedTerrain;
+        private DisposUndoProxy undoProxy;
         
         private Vector2 leftPanelScroll;
         private Vector2 rightPanelScroll;
@@ -31,10 +32,24 @@ namespace Editor
         private bool showLabels = true;
         private bool showDirections = true;
         private bool showIcons = true;
+        private bool showSimplifiedNames = true;
         
         private bool isDraggingUnit = false;
         private DisposEntry draggedEntry = null;
         private bool documentIsDirty = false;
+        
+        // Difficulty filter toggles
+        private bool filterNormal = true;
+        private bool filterHard = true;
+        private bool filterLunatic = true;
+
+        // Quick Picker state
+        private bool pickerOpen = false;
+        private List<DisposEntry> pickerEntries = new List<DisposEntry>();
+        private Rect pickerRect;
+        private int pickerHoverIndex = -1;
+        private Vector2Int pickerTile;
+        private DisposEntry pickerHighlightEntry;
 
         private enum DisposOverlayMode { Hide, Show, Edit }
         private DisposOverlayMode overlayMode = DisposOverlayMode.Edit;
@@ -53,8 +68,12 @@ namespace Editor
             sceneRenderer = new DisposSceneRenderer();
             sceneRenderer.Initialize();
             
+            // Create undo proxy
+            undoProxy = ScriptableObject.CreateInstance<DisposUndoProxy>();
+            
             SceneView.duringSceneGui += OnSceneGUI;
             Selection.selectionChanged += OnSelectionChanged;
+            Undo.undoRedoPerformed += OnUndoRedoPerformed;
 
             // Try to ensure our scene GUI draws after others
             EditorApplication.delayCall += () =>
@@ -72,6 +91,12 @@ namespace Editor
             {
                 LoadFile(0);
             }
+
+            // Load difficulty filter prefs and apply
+            filterNormal = EditorPrefs.GetBool("Dispos_Filter_N", true);
+            filterHard = EditorPrefs.GetBool("Dispos_Filter_H", true);
+            filterLunatic = EditorPrefs.GetBool("Dispos_Filter_L", true);
+            sceneRenderer.SetDifficultyFilter(filterNormal, filterHard, filterLunatic);
         }
         
         private void OnDisable()
@@ -80,6 +105,7 @@ namespace Editor
             
             SceneView.duringSceneGui -= OnSceneGUI;
             Selection.selectionChanged -= OnSelectionChanged;
+            Undo.undoRedoPerformed -= OnUndoRedoPerformed;
             
             // Restore tools visibility
             Tools.hidden = false;
@@ -91,10 +117,45 @@ namespace Editor
             {
                 sceneRenderer.Cleanup();
             }
+            
+            if (undoProxy != null)
+            {
+                DestroyImmediate(undoProxy);
+                undoProxy = null;
+            }
+        }
+        
+        private void OnUndoRedoPerformed()
+        {
+            if (undoProxy != null && currentDocument != null)
+            {
+                // Restore document state from undo proxy
+                undoProxy.RestoreFromSerializedState();
+                
+                // Mark document as dirty
+                documentIsDirty = true;
+                
+                // Refresh the scene
+                sceneRenderer?.RenderDocument(currentDocument, selectedTerrain);
+                SceneView.RepaintAll();
+                Repaint();
+            }
         }
         
         private void OnGUI()
         {
+            // Also allow closing the quick picker with Escape when the editor window has focus
+            var evt = Event.current;
+            if (pickerOpen && evt != null && (evt.type == EventType.KeyDown || evt.type == EventType.KeyUp) && evt.keyCode == KeyCode.Escape)
+            {
+                pickerOpen = false;
+                evt.Use();
+                SceneView.RepaintAll();
+                Repaint();
+                // Early return to avoid drawing one more frame with picker state
+                return;
+            }
+
             DrawToolbar();
             
             EditorGUILayout.BeginHorizontal();
@@ -177,6 +238,26 @@ namespace Editor
             showDirections = GUILayout.Toggle(showDirections, "Directions", EditorStyles.toolbarButton, GUILayout.Width(70));
             showIcons = GUILayout.Toggle(showIcons, "Icons", EditorStyles.toolbarButton, GUILayout.Width(50));
             
+            if (showLabels)
+            {
+                showSimplifiedNames = GUILayout.Toggle(showSimplifiedNames, "Simple Names", EditorStyles.toolbarButton, GUILayout.Width(90));
+            }
+
+            // Difficulty filter toggles
+            GUILayout.Space(6);
+            GUILayout.Label("Diff:", EditorStyles.miniLabel, GUILayout.Width(30));
+            bool n = GUILayout.Toggle(filterNormal, "N", EditorStyles.toolbarButton, GUILayout.Width(24));
+            bool h = GUILayout.Toggle(filterHard, "H", EditorStyles.toolbarButton, GUILayout.Width(24));
+            bool l = GUILayout.Toggle(filterLunatic, "L", EditorStyles.toolbarButton, GUILayout.Width(24));
+            if (n != filterNormal || h != filterHard || l != filterLunatic)
+            {
+                filterNormal = n; filterHard = h; filterLunatic = l;
+                EditorPrefs.SetBool("Dispos_Filter_N", filterNormal);
+                EditorPrefs.SetBool("Dispos_Filter_H", filterHard);
+                EditorPrefs.SetBool("Dispos_Filter_L", filterLunatic);
+                sceneRenderer.SetDifficultyFilter(filterNormal, filterHard, filterLunatic);
+            }
+            
             GUI.enabled = currentDocument != null && documentIsDirty;
             if (GUILayout.Button("Save", EditorStyles.toolbarButton, GUILayout.Width(60)))
             {
@@ -191,6 +272,7 @@ namespace Editor
             sceneRenderer?.SetShowLabels(showLabels);
             sceneRenderer?.SetShowDirections(showDirections);
             sceneRenderer?.SetShowIcons(showIcons);
+            sceneRenderer?.SetShowSimplifiedNames(showSimplifiedNames);
         }
         
         private void DrawLeftPanel()
@@ -345,6 +427,12 @@ namespace Editor
         {
             EditorGUILayout.LabelField("Basic Info", EditorStyles.boldLabel);
             
+            // Record undo before any changes
+            if (undoProxy != null)
+            {
+                undoProxy.RecordUndo("Change Unit Properties");
+            }
+            
             EditorGUI.BeginChangeCheck();
             
             GUI.enabled = false;
@@ -440,6 +528,7 @@ namespace Editor
 
             if (EditorGUI.EndChangeCheck())
             {
+                documentIsDirty = true;
                 sceneRenderer.RenderDocument(currentDocument);
                 SceneView.RepaintAll();
             }
@@ -492,10 +581,18 @@ namespace Editor
             {
                 if (overlayMode != DisposOverlayMode.Hide)
                 {
+                    // Reposition picker to follow camera movement
+                    if (pickerOpen)
+                    {
+                        UpdatePickerRectPlacement();
+                    }
+                    // Inform renderer about picker to avoid label overlap (uses updated rect)
+                    sceneRenderer.SetGuiOcclusionRect(pickerOpen ? pickerRect : Rect.zero);
                     sceneRenderer.DrawSceneGUI();
                     if (overlayMode == DisposOverlayMode.Edit)
                     {
                         HandleSceneInput();
+                        DrawQuickPicker();
                     }
                 }
 
@@ -506,12 +603,48 @@ namespace Editor
                 if (Tools.hidden) Tools.current = Tool.None;
             }
         }
+
+        private void UpdatePickerRectPlacement()
+        {
+            if (!pickerOpen || pickerEntries == null || pickerEntries.Count <= 1) return;
+            Rect tileRect = sceneRenderer.GetTileScreenRect(pickerTile);
+            float width = 240f;
+            float rowH = 22f;
+            float headerH = 18f;
+            int rowsWanted = Mathf.Clamp(pickerEntries.Count, 2, 8);
+            float height = headerH + rowsWanted * rowH + 8f; // header + rows + padding
+            float x = tileRect.xMax + 8f;
+            if (x + width > Screen.width) x = tileRect.xMin - 8f - width;
+            float y = tileRect.yMin;
+            // Clamp to screen bounds to avoid going off-screen vertically
+            y = Mathf.Clamp(y, 0, Screen.height - height - 8f);
+            pickerRect = new Rect(x, y, width, height);
+        }
         
         private void HandleSceneInput()
         {
             Event e = Event.current;
             
+            // Handle Escape key to close picker (scene view focus)
+            if (pickerOpen && (e.type == EventType.KeyDown || e.type == EventType.KeyUp) && e.keyCode == KeyCode.Escape)
+            {
+                pickerOpen = false;
+                e.Use();
+                SceneView.RepaintAll();
+                return;
+            }
+            
             // Keyboard nudging disabled per request; movement via drag handle only
+
+            // If the quick picker is open and the mouse is over it, let the picker consume events
+            if (pickerOpen && pickerRect.Contains(e.mousePosition))
+            {
+                if (e.type == EventType.MouseDrag)
+                {
+                    e.Use();
+                }
+                return;
+            }
 
             // Claim mouse focus to make icon dragging reliable in Edit mode
             if (e.type == EventType.Layout)
@@ -521,9 +654,35 @@ namespace Editor
 
             if (e.type == EventType.MouseDown && e.button == 0)
             {
-                // First try screen-space hit test against icon/plate
-                var entry = sceneRenderer.GetEntryAtScreenPosition(e.mousePosition);
-                if (entry == null)
+                // First check if clicking on a stack badge
+                if (sceneRenderer.TryGetStackBadgeClick(e.mousePosition, out var badgeTile, out var badgeEntries))
+                {
+                    pickerOpen = true;
+                    pickerEntries = badgeEntries;
+                    pickerTile = badgeTile;
+                    Rect tileRect = sceneRenderer.GetTileScreenRect(badgeTile);
+                    float width = 240f;
+                    float rowH = 22f;
+                    float headerH = 18f;
+                    int rowsWanted = Mathf.Clamp(badgeEntries.Count, 2, 8);
+                    float height = headerH + rowsWanted * rowH + 8f;
+                    float x = tileRect.xMax + 8f;
+                    if (x + width > Screen.width) x = tileRect.xMin - 8f - width;
+                    float y = tileRect.yMin;
+                    pickerRect = new Rect(x, y, width, height);
+                    pickerHoverIndex = -1;
+                    // Pre-highlight: prefer current selection on this tile, otherwise tile's current top entry, otherwise first
+                    if (selectedEntry != null && selectedEntry.DisposX == pickerTile.x && selectedEntry.DisposY == pickerTile.y && pickerEntries.Contains(selectedEntry))
+                        pickerHighlightEntry = selectedEntry;
+                    else
+                        pickerHighlightEntry = sceneRenderer.GetTopEntryOnTile(pickerTile) ?? pickerEntries[0];
+                    e.Use();
+                    return;
+                }
+                
+                // Then try screen-space hit test to get all entries at cursor
+                var entries = sceneRenderer.GetEntriesAtScreenPosition(e.mousePosition);
+                if (entries == null || entries.Count == 0)
                 {
                     // Fallback to plane-space tile hit
                     Ray ray = HandleUtility.GUIPointToWorldRay(e.mousePosition);
@@ -532,18 +691,50 @@ namespace Editor
                     if (distance > 0)
                     {
                         Vector3 worldPos = ray.origin + ray.direction * distance;
-                        entry = sceneRenderer.GetEntryAtPosition(worldPos);
+                        var e1 = sceneRenderer.GetEntryAtPosition(worldPos);
+                        if (e1 != null) {
+                            entries = new List<DisposEntry> { e1 };
+                        }
                     }
                 }
 
-                if (entry != null)
+                if (entries != null && entries.Count > 0)
                 {
-                    SelectEntry(entry);
-                    if (!e.shift)
+                    if (entries.Count == 1)
                     {
-                        isDraggingUnit = true;
-                        draggedEntry = entry;
+                        SelectEntry(entries[0]);
+                        if (!e.shift)
+                        {
+                            isDraggingUnit = true;
+                            draggedEntry = entries[0];
+                        }
+                        e.Use();
                     }
+                    else
+                    {
+                        // Multiple entries on this tile; default to editing the current top unit
+                        var tile = new Vector2Int(entries[0].DisposX, entries[0].DisposY);
+                        pickerTile = tile; // keep updated for potential future picker opens
+
+                        // Choose the renderer's top entry, or fall back to the first
+                        DisposEntry target = sceneRenderer.GetTopEntryOnTile(tile) ?? entries[0];
+
+                        if (target != null)
+                        {
+                            SelectEntry(target);
+                            if (!e.shift)
+                            {
+                                isDraggingUnit = true;
+                                draggedEntry = target;
+                            }
+                        }
+                        e.Use();
+                    }
+                }
+                else
+                {
+                    // Clicked on empty space - clear selection
+                    SelectEntry(null);
                     e.Use();
                 }
             }
@@ -555,7 +746,7 @@ namespace Editor
                 if (distance > 0)
                 {
                     Vector3 worldPos = ray.origin + ray.direction * distance;
-                    sceneRenderer.MoveEntry(draggedEntry, worldPos);
+                    sceneRenderer.MoveEntry(draggedEntry, worldPos, undoProxy);
                     documentIsDirty = true;
                     Repaint();
                     e.Use();
@@ -566,6 +757,89 @@ namespace Editor
                 isDraggingUnit = false;
                 draggedEntry = null;
             }
+        }
+
+        private void DrawQuickPicker()
+        {
+            if (!pickerOpen || pickerEntries == null || pickerEntries.Count <= 1) return;
+            
+            Handles.BeginGUI();
+            // Opaque background and header
+            EditorGUI.DrawRect(pickerRect, new Color(0.12f, 0.12f, 0.12f, 1f));
+            Rect headerRect = new Rect(pickerRect.x, pickerRect.y, pickerRect.width, 18f);
+            EditorGUI.DrawRect(headerRect, new Color(0.18f, 0.18f, 0.18f, 1f));
+            GUIStyle headerStyle = new GUIStyle(GUI.skin.label);
+            headerStyle.alignment = TextAnchor.MiddleLeft;
+            headerStyle.fontStyle = FontStyle.Bold;
+            headerStyle.normal.textColor = Color.white;
+            headerStyle.padding = new RectOffset(6, 4, 0, 0);
+            // Header text (no tooltip) and reserved space for close button
+            string headerText = $"{pickerEntries.Count} units here - choose which to edit";
+            Rect headerTextRect = new Rect(headerRect.x, headerRect.y, headerRect.width - 22f, headerRect.height);
+            GUI.Label(headerTextRect, headerText, headerStyle);
+            // Close button on header (top-right)
+            Rect closeRect = new Rect(headerRect.xMax - 18f, headerRect.y + 1f, 16f, 16f);
+            if (GUI.Button(closeRect, "x"))
+            {
+                pickerOpen = false;
+                Event.current.Use();
+                Handles.EndGUI();
+                return;
+            }
+
+            Rect listRect = new Rect(pickerRect.x + 6, pickerRect.y + headerRect.height + 2, pickerRect.width - 12, pickerRect.height - headerRect.height - 8);
+            float rowH = 22f;
+            int rows = Mathf.Min(pickerEntries.Count, Mathf.Max(1, Mathf.FloorToInt(listRect.height / rowH)));
+            // Default: no hover highlight until we detect it
+            sceneRenderer.SetHoverEntry(null);
+            for (int i = 0; i < rows; i++)
+            {
+                var pe = pickerEntries[i];
+                Rect r = new Rect(listRect.x, listRect.y + i * rowH, listRect.width, rowH - 2);
+                bool hover = r.Contains(Event.current.mousePosition);
+                if (hover) pickerHoverIndex = i;
+                if (hover)
+                {
+                    // Preview highlight in scene while hovering
+                    sceneRenderer.SetHoverEntry(pe);
+                }
+                if (pe == pickerHighlightEntry)
+                {
+                    EditorGUI.DrawRect(r, new Color(0.25f, 0.45f, 0.85f, 0.35f));
+                }
+                else if (hover)
+                {
+                    EditorGUI.DrawRect(r, new Color(1f,1f,1f,0.12f));
+                }
+                string label = DisposDataLoader.Instance.GetUnitDisplayName(pe);
+                string diff = DiffString(pe.Flag);
+                GUIStyle rowStyle = new GUIStyle(GUI.skin.label);
+                if (pe == pickerHighlightEntry) rowStyle.fontStyle = FontStyle.Bold;
+                GUI.Label(r, $"{label}  [{pe.Group}]  {diff}", rowStyle);
+                if (Event.current.type == EventType.MouseDown && Event.current.button == 0 && hover)
+                {
+                    SelectEntry(pe);
+                    pickerOpen = false;
+                    sceneRenderer.SetHoverEntry(null);
+                    Event.current.Use();
+                }
+            }
+            if (Event.current.type == EventType.MouseDown && Event.current.button == 0 && !pickerRect.Contains(Event.current.mousePosition))
+            {
+                pickerOpen = false;
+                sceneRenderer.SetHoverEntry(null);
+                Event.current.Use();
+            }
+            Handles.EndGUI();
+        }
+
+        private string DiffString(int flag)
+        {
+            System.Text.StringBuilder sb = new System.Text.StringBuilder();
+            if ((flag & (int)DisposFlags.Normal) != 0) sb.Append("N");
+            if ((flag & (int)DisposFlags.Hard) != 0) sb.Append("H");
+            if ((flag & (int)DisposFlags.Lunatic) != 0) sb.Append("L");
+            return sb.Length == 0 ? "ALL" : sb.ToString();
         }
         
         private void RefreshFileList()
@@ -600,6 +874,15 @@ namespace Editor
             
             currentDocument = DisposDocument.LoadFromFile(filePath);
             documentIsDirty = false;
+            
+            // Set document on undo proxy
+            if (undoProxy != null)
+            {
+                undoProxy.Document = currentDocument;
+            }
+            
+            // Clear undo history when loading new document
+            Undo.ClearAll();
             
             if (currentDocument != null && sceneRenderer != null)
             {
