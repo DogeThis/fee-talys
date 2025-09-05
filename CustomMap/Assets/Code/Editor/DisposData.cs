@@ -107,7 +107,8 @@ namespace Editor
             return new Dictionary<string, string>(additionalAttributes);
         }
         
-        public bool IsGroupHeader => string.IsNullOrEmpty(Pid) && !string.IsNullOrEmpty(Group);
+        // In-memory header flag; do not infer from PID so units can have empty PIDs safely
+        public bool IsGroupHeader { get; set; }
         
         public Vector2Int GetDisposPosition() => new Vector2Int(DisposX, DisposY);
         public Vector2Int GetAppearPosition() => new Vector2Int(AppearX, AppearY);
@@ -181,6 +182,8 @@ namespace Editor
                     }
                     else if (currentGroup != null)
                     {
+                        // Assign group name in-memory for convenience
+                        entry.Group = currentGroup.GroupName;
                         currentGroup.Entries.Add(entry);
                         Debug.Log($"Added entry to group {currentGroup.GroupName}: {entry.Pid} at ({entry.DisposX}, {entry.DisposY})");
                     }
@@ -256,6 +259,9 @@ namespace Editor
                     entry.SetAdditionalAttribute(attr.Name, attr.Value);
                 }
             }
+
+            // Determine header from persisted format: non-empty Group with empty Pid
+            entry.IsGroupHeader = !string.IsNullOrEmpty(entry.Group) && string.IsNullOrEmpty(entry.Pid);
             
             return entry;
         }
@@ -350,54 +356,117 @@ namespace Editor
         
         private void WriteEntryToXml(XmlElement element, DisposEntry entry)
         {
-            element.SetAttribute("Group", entry.Group);
-            element.SetAttribute("Pid", entry.Pid);
-            element.SetAttribute("Force", entry.Force.ToString());
-            element.SetAttribute("Flag", entry.Flag.ToString());
-            element.SetAttribute("AppearX", entry.AppearX.ToString());
-            element.SetAttribute("AppearY", entry.AppearY.ToString());
-            element.SetAttribute("DisposX", entry.DisposX.ToString());
-            element.SetAttribute("DisposY", entry.DisposY.ToString());
-            element.SetAttribute("Direction", entry.Direction.ToString());
-            element.SetAttribute("LevelN", entry.LevelN.ToString());
-            element.SetAttribute("LevelH", entry.LevelH.ToString());
-            element.SetAttribute("LevelL", entry.LevelL.ToString());
-            element.SetAttribute("Jid", entry.Jid);
+            // Persist in canonical format: headers carry Group name + empty Pid; units carry empty Group
+            string groupAttr = entry.IsGroupHeader ? (entry.Group ?? "") : "";
+            string pidAttr = entry.IsGroupHeader ? "" : (entry.Pid ?? "");
+            element.SetAttribute("Group", groupAttr);
+            element.SetAttribute("Pid", pidAttr);
+            if (entry.IsGroupHeader)
+            {
+                // Write blank values for header rows to match source style
+                element.SetAttribute("Force", "");
+                element.SetAttribute("Flag", "");
+                element.SetAttribute("AppearX", "");
+                element.SetAttribute("AppearY", "");
+                element.SetAttribute("DisposX", "");
+                element.SetAttribute("DisposY", "");
+                element.SetAttribute("Direction", "");
+                element.SetAttribute("LevelN", "");
+                element.SetAttribute("LevelH", "");
+                element.SetAttribute("LevelL", "");
+                element.SetAttribute("Jid", "");
+            }
+            else
+            {
+                element.SetAttribute("Force", entry.Force.ToString());
+                element.SetAttribute("Flag", entry.Flag.ToString());
+                element.SetAttribute("AppearX", entry.AppearX.ToString());
+                element.SetAttribute("AppearY", entry.AppearY.ToString());
+                element.SetAttribute("DisposX", entry.DisposX.ToString());
+                element.SetAttribute("DisposY", entry.DisposY.ToString());
+                element.SetAttribute("Direction", entry.Direction.ToString());
+                element.SetAttribute("LevelN", entry.LevelN.ToString());
+                element.SetAttribute("LevelH", entry.LevelH.ToString());
+                element.SetAttribute("LevelL", entry.LevelL.ToString());
+                element.SetAttribute("Jid", entry.Jid);
+            }
             
             for (int i = 0; i < 6; i++)
             {
-                element.SetAttribute($"Item{i+1}.Iid", entry.Items[i].Iid);
-                element.SetAttribute($"Item{i+1}.Drop", entry.Items[i].Drop.ToString());
+                if (entry.IsGroupHeader)
+                {
+                    element.SetAttribute($"Item{i+1}.Iid", "");
+                    element.SetAttribute($"Item{i+1}.Drop", "");
+                }
+                else
+                {
+                    element.SetAttribute($"Item{i+1}.Iid", entry.Items[i].Iid);
+                    element.SetAttribute($"Item{i+1}.Drop", entry.Items[i].Drop.ToString());
+                }
             }
             
-            element.SetAttribute("Sid", entry.Sid);
-            element.SetAttribute("Bid", entry.Bid);
-            element.SetAttribute("Gid", entry.Gid);
-            element.SetAttribute("HpStockCount", entry.HpStockCount.ToString());
+            if (entry.IsGroupHeader)
+            {
+                element.SetAttribute("Sid", "");
+                element.SetAttribute("Bid", "");
+                element.SetAttribute("Gid", "");
+                element.SetAttribute("HpStockCount", "");
+            }
+            else
+            {
+                element.SetAttribute("Sid", entry.Sid);
+                element.SetAttribute("Bid", entry.Bid);
+                element.SetAttribute("Gid", entry.Gid);
+                element.SetAttribute("HpStockCount", entry.HpStockCount.ToString());
+            }
             
             for (int i = 0; i < 6; i++)
             {
-                element.SetAttribute($"State{i}", entry.States[i].ToString());
+                element.SetAttribute($"State{i}", entry.IsGroupHeader ? "" : entry.States[i].ToString());
             }
             
-            element.SetAttribute("AI_ActionName", entry.AI_ActionName);
-            element.SetAttribute("AI_ActionVal", entry.AI_ActionVal);
-            element.SetAttribute("AI_MindName", entry.AI_MindName);
-            element.SetAttribute("AI_MindVal", entry.AI_MindVal);
-            element.SetAttribute("AI_AttackName", entry.AI_AttackName);
-            element.SetAttribute("AI_AttackVal", entry.AI_AttackVal);
-            element.SetAttribute("AI_MoveName", entry.AI_MoveName);
-            element.SetAttribute("AI_MoveVal", entry.AI_MoveVal);
-            element.SetAttribute("AI_BattleRate", entry.AI_BattleRate);
-            element.SetAttribute("AI_Priority", entry.AI_Priority.ToString());
-            element.SetAttribute("AI_HealRateA", entry.AI_HealRateA.ToString());
-            element.SetAttribute("AI_HealRateB", entry.AI_HealRateB.ToString());
-            element.SetAttribute("AI_BandNo", entry.AI_BandNo.ToString());
-            element.SetAttribute("AI_MoveLimit", entry.AI_MoveLimit);
-            element.SetAttribute("AI_Flag", entry.AI_Flag.ToString());
-            element.SetAttribute("AI_Active", entry.AI_Active ?? "");
-            element.SetAttribute("AI_ActiveTurn", entry.AI_ActiveTurn.ToString());
-            element.SetAttribute("AI_ActiveFlag", entry.AI_ActiveFlag ?? "");
+            if (entry.IsGroupHeader)
+            {
+                element.SetAttribute("AI_ActionName", "");
+                element.SetAttribute("AI_ActionVal", "");
+                element.SetAttribute("AI_MindName", "");
+                element.SetAttribute("AI_MindVal", "");
+                element.SetAttribute("AI_AttackName", "");
+                element.SetAttribute("AI_AttackVal", "");
+                element.SetAttribute("AI_MoveName", "");
+                element.SetAttribute("AI_MoveVal", "");
+                element.SetAttribute("AI_BattleRate", "");
+                element.SetAttribute("AI_Priority", "");
+                element.SetAttribute("AI_HealRateA", "");
+                element.SetAttribute("AI_HealRateB", "");
+                element.SetAttribute("AI_BandNo", "");
+                element.SetAttribute("AI_MoveLimit", "");
+                element.SetAttribute("AI_Flag", "");
+                element.SetAttribute("AI_Active", "");
+                element.SetAttribute("AI_ActiveTurn", "");
+                element.SetAttribute("AI_ActiveFlag", "");
+            }
+            else
+            {
+                element.SetAttribute("AI_ActionName", entry.AI_ActionName);
+                element.SetAttribute("AI_ActionVal", entry.AI_ActionVal);
+                element.SetAttribute("AI_MindName", entry.AI_MindName);
+                element.SetAttribute("AI_MindVal", entry.AI_MindVal);
+                element.SetAttribute("AI_AttackName", entry.AI_AttackName);
+                element.SetAttribute("AI_AttackVal", entry.AI_AttackVal);
+                element.SetAttribute("AI_MoveName", entry.AI_MoveName);
+                element.SetAttribute("AI_MoveVal", entry.AI_MoveVal);
+                element.SetAttribute("AI_BattleRate", entry.AI_BattleRate);
+                element.SetAttribute("AI_Priority", entry.AI_Priority.ToString());
+                element.SetAttribute("AI_HealRateA", entry.AI_HealRateA.ToString());
+                element.SetAttribute("AI_HealRateB", entry.AI_HealRateB.ToString());
+                element.SetAttribute("AI_BandNo", entry.AI_BandNo.ToString());
+                element.SetAttribute("AI_MoveLimit", entry.AI_MoveLimit);
+                element.SetAttribute("AI_Flag", entry.AI_Flag.ToString());
+                element.SetAttribute("AI_Active", entry.AI_Active ?? "");
+                element.SetAttribute("AI_ActiveTurn", entry.AI_ActiveTurn.ToString());
+                element.SetAttribute("AI_ActiveFlag", entry.AI_ActiveFlag ?? "");
+            }
             
             foreach (var kvp in entry.GetAllAdditionalAttributes())
             {

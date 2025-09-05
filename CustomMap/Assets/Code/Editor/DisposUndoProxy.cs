@@ -68,6 +68,10 @@ namespace Editor
                 public int LevelL;
                 public string Jid;
                 public string Sid;
+                public string Bid;
+                public string Gid;
+                public int HpStockCount;
+                public int[] States;
                 [System.Serializable]
                 public class SerializedItem
                 {
@@ -76,6 +80,30 @@ namespace Editor
                 }
                 
                 public SerializedItem[] Items;
+
+                // AI
+                public string AI_ActionName;
+                public string AI_ActionVal;
+                public string AI_MindName;
+                public string AI_MindVal;
+                public string AI_AttackName;
+                public string AI_AttackVal;
+                public string AI_MoveName;
+                public string AI_MoveVal;
+                public string AI_BattleRate;
+                public int AI_Priority;
+                public int AI_HealRateA;
+                public int AI_HealRateB;
+                public int AI_BandNo;
+                public string AI_MoveLimit;
+                public int AI_Flag;
+                public string AI_Active;
+                public int AI_ActiveTurn;
+                public string AI_ActiveFlag;
+
+                // Additional attributes captured from XML
+                public string[] AdditionalKeys;
+                public string[] AdditionalValues;
                 
                 public SerializedEntry() { }
                 
@@ -95,6 +123,10 @@ namespace Editor
                     LevelL = entry.LevelL;
                     Jid = entry.Jid;
                     Sid = entry.Sid;
+                    Bid = entry.Bid;
+                    Gid = entry.Gid;
+                    HpStockCount = entry.HpStockCount;
+                    States = entry.States != null ? entry.States.ToArray() : null;
                     
                     // Copy items
                     Items = new SerializedItem[entry.Items.Length];
@@ -108,6 +140,34 @@ namespace Editor
                                 Drop = entry.Items[i].Drop
                             };
                         }
+                    }
+
+                    // AI block
+                    AI_ActionName = entry.AI_ActionName;
+                    AI_ActionVal = entry.AI_ActionVal;
+                    AI_MindName = entry.AI_MindName;
+                    AI_MindVal = entry.AI_MindVal;
+                    AI_AttackName = entry.AI_AttackName;
+                    AI_AttackVal = entry.AI_AttackVal;
+                    AI_MoveName = entry.AI_MoveName;
+                    AI_MoveVal = entry.AI_MoveVal;
+                    AI_BattleRate = entry.AI_BattleRate;
+                    AI_Priority = entry.AI_Priority;
+                    AI_HealRateA = entry.AI_HealRateA;
+                    AI_HealRateB = entry.AI_HealRateB;
+                    AI_BandNo = entry.AI_BandNo;
+                    AI_MoveLimit = entry.AI_MoveLimit;
+                    AI_Flag = entry.AI_Flag;
+                    AI_Active = entry.AI_Active;
+                    AI_ActiveTurn = entry.AI_ActiveTurn;
+                    AI_ActiveFlag = entry.AI_ActiveFlag;
+
+                    // Additional attributes
+                    var add = entry.GetAllAdditionalAttributes();
+                    if (add != null && add.Count > 0)
+                    {
+                        AdditionalKeys = add.Keys.ToArray();
+                        AdditionalValues = add.Values.ToArray();
                     }
                 }
                 
@@ -127,6 +187,13 @@ namespace Editor
                     entry.LevelL = LevelL;
                     entry.Jid = Jid;
                     entry.Sid = Sid;
+                    entry.Bid = Bid;
+                    entry.Gid = Gid;
+                    entry.HpStockCount = HpStockCount;
+                    if (States != null && States.Length == entry.States.Length)
+                    {
+                        for (int i = 0; i < States.Length; i++) entry.States[i] = States[i];
+                    }
                     
                     // Copy items back
                     if (Items != null)
@@ -141,6 +208,36 @@ namespace Editor
                                 entry.Items[i].Iid = Items[i].Iid;
                                 entry.Items[i].Drop = Items[i].Drop;
                             }
+                        }
+                    }
+
+                    // AI block
+                    entry.AI_ActionName = AI_ActionName;
+                    entry.AI_ActionVal = AI_ActionVal;
+                    entry.AI_MindName = AI_MindName;
+                    entry.AI_MindVal = AI_MindVal;
+                    entry.AI_AttackName = AI_AttackName;
+                    entry.AI_AttackVal = AI_AttackVal;
+                    entry.AI_MoveName = AI_MoveName;
+                    entry.AI_MoveVal = AI_MoveVal;
+                    entry.AI_BattleRate = AI_BattleRate;
+                    entry.AI_Priority = AI_Priority;
+                    entry.AI_HealRateA = AI_HealRateA;
+                    entry.AI_HealRateB = AI_HealRateB;
+                    entry.AI_BandNo = AI_BandNo;
+                    entry.AI_MoveLimit = AI_MoveLimit;
+                    entry.AI_Flag = AI_Flag;
+                    entry.AI_Active = AI_Active;
+                    entry.AI_ActiveTurn = AI_ActiveTurn;
+                    entry.AI_ActiveFlag = AI_ActiveFlag;
+
+                    // Additional attributes
+                    if (AdditionalKeys != null && AdditionalValues != null)
+                    {
+                        int n = Mathf.Min(AdditionalKeys.Length, AdditionalValues.Length);
+                        for (int i = 0; i < n; i++)
+                        {
+                            entry.SetAdditionalAttribute(AdditionalKeys[i], AdditionalValues[i]);
                         }
                     }
                 }

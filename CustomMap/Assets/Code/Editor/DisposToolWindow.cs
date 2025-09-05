@@ -23,6 +23,9 @@ namespace Editor
         private float rightPanelWidth = 300f;
         private bool isResizingLeft;
         private bool isResizingRight;
+
+        // UI state for creating groups
+        private string newGroupName = "";
         
         private string[] availableFiles;
         private int selectedFileIndex = -1;
@@ -37,6 +40,9 @@ namespace Editor
         private bool isDraggingUnit = false;
         private DisposEntry draggedEntry = null;
         private bool documentIsDirty = false;
+        // Empty-tile selection state (for placing new units)
+        private bool hasSelectedTile = false;
+        private Vector2Int selectedTile;
         
         // Difficulty filter toggles
         private bool filterNormal = true;
@@ -314,6 +320,13 @@ namespace Editor
             
             EditorGUILayout.Space();
             EditorGUILayout.LabelField("Groups", EditorStyles.boldLabel);
+            EditorGUILayout.BeginHorizontal();
+            newGroupName = EditorGUILayout.TextField("New Group", newGroupName);
+            if (GUILayout.Button("Add", GUILayout.Width(60)))
+            {
+                TryAddGroup(newGroupName);
+            }
+            EditorGUILayout.EndHorizontal();
             
             leftPanelScroll = EditorGUILayout.BeginScrollView(leftPanelScroll);
             
@@ -336,6 +349,19 @@ namespace Editor
             group.IsExpanded = EditorGUILayout.Foldout(group.IsExpanded, group.GroupName);
             
             GUILayout.FlexibleSpace();
+
+            // Add Unit / Move Selected Here quick actions
+            if (GUILayout.Button("+ Unit", EditorStyles.miniButton, GUILayout.Width(60)))
+            {
+                AddUnitToGroup(group);
+            }
+            bool canMoveSelected = selectedEntry != null && !selectedEntry.IsGroupHeader && selectedEntry.Group != group.GroupName;
+            GUI.enabled = canMoveSelected;
+            if (GUILayout.Button("Move Here", EditorStyles.miniButton, GUILayout.Width(80)))
+            {
+                MoveSelectedToGroup(group);
+            }
+            GUI.enabled = true;
             
             bool newVisible = EditorGUILayout.Toggle(group.IsVisible, GUILayout.Width(20));
             if (newVisible != group.IsVisible)
@@ -367,7 +393,8 @@ namespace Editor
                 EditorGUILayout.LabelField($"  Units: {group.Entries.Count} (P:{playerCount} E:{enemyCount} A:{allyCount})", 
                                           EditorStyles.miniLabel);
                 
-                foreach (var entry in group.Entries.Take(10))
+                // Show all entries (no truncation)
+                foreach (var entry in group.Entries)
                 {
                     if (!entry.IsGroupHeader)
                     {
@@ -392,14 +419,141 @@ namespace Editor
                     }
                 }
                 
-                if (group.Entries.Count > 10)
-                {
-                    EditorGUILayout.LabelField($"  ... and {group.Entries.Count - 10} more", 
-                                              EditorStyles.miniLabel);
-                }
+                // No truncation footer — we show all rows within the scroll view
                 
                 EditorGUI.indentLevel--;
             }
+        }
+
+        private void TryAddGroup(string name)
+        {
+            if (currentDocument == null) return;
+            string trimmed = (name ?? "").Trim();
+            if (string.IsNullOrEmpty(trimmed))
+            {
+                EditorUtility.DisplayDialog("Add Group", "Please enter a non-empty group name.", "OK");
+                return;
+            }
+            // Ensure uniqueness
+            if (currentDocument.Groups.Any(g => g.GroupName == trimmed))
+            {
+                EditorUtility.DisplayDialog("Add Group", $"Group '{trimmed}' already exists.", "OK");
+                return;
+            }
+
+            // Record undo
+            undoProxy?.RecordUndo("Add Group");
+
+            // Create header entry to mark the group boundary in XML
+            var headerEntry = new DisposEntry
+            {
+                Group = trimmed,
+                Pid = "" // header marker via empty PID
+            };
+
+            // Create group container
+            var newGroup = new DisposGroup
+            {
+                GroupName = trimmed,
+                Entries = new List<DisposEntry>(), // header not included in group entries
+                IsExpanded = true,
+                IsVisible = true
+            };
+
+            currentDocument.Groups.Add(newGroup);
+            currentDocument.AllEntries.Add(headerEntry);
+            documentIsDirty = true;
+            newGroupName = "";
+            sceneRenderer.RenderDocument(currentDocument);
+            Repaint();
+        }
+
+        private void AddUnitToGroup(DisposGroup group)
+        {
+            if (currentDocument == null || group == null) return;
+            undoProxy?.RecordUndo("Add Unit to Group");
+
+            var e = new DisposEntry
+            {
+                Group = group.GroupName,
+                // Empty PID allowed in-memory; this remains a unit (not a header)
+                Pid = "",
+                Force = 0,
+                Flag = 0,
+                AppearX = hasSelectedTile ? selectedTile.x : 0,
+                AppearY = hasSelectedTile ? selectedTile.y : 0,
+                DisposX = hasSelectedTile ? selectedTile.x : 0,
+                DisposY = hasSelectedTile ? selectedTile.y : 0,
+                Direction = 0,
+                LevelN = 0,
+                LevelH = 0,
+                LevelL = 0,
+                Jid = "",
+            };
+            e.IsGroupHeader = false;
+
+            // Insert into AllEntries after the group's last entry if possible
+            int insertIndex = -1;
+            for (int i = 0; i < currentDocument.AllEntries.Count; i++)
+            {
+                var ae = currentDocument.AllEntries[i];
+                if (ae.Group == group.GroupName)
+                    insertIndex = i; // keep updating to last occurrence
+            }
+            if (insertIndex >= 0 && insertIndex + 1 <= currentDocument.AllEntries.Count)
+                currentDocument.AllEntries.Insert(insertIndex + 1, e);
+            else
+                currentDocument.AllEntries.Add(e);
+
+            group.Entries.Add(e);
+            documentIsDirty = true;
+            sceneRenderer.RenderDocument(currentDocument);
+            SelectEntry(e);
+            SceneView.RepaintAll();
+            // Keep the tile highlight for further adds if desired
+        }
+
+        private void MoveSelectedToGroup(DisposGroup target)
+        {
+            if (currentDocument == null || target == null || selectedEntry == null) return;
+            var entry = selectedEntry;
+            if (entry.IsGroupHeader) return;
+            if (entry.Group == target.GroupName) return;
+
+            undoProxy?.RecordUndo("Move Unit To Group");
+
+            // Remove from old group container
+            var oldGroup = currentDocument.Groups.FirstOrDefault(g => g.GroupName == entry.Group);
+            if (oldGroup != null)
+                oldGroup.Entries.Remove(entry);
+
+            // Update the entry's group field
+            entry.Group = target.GroupName;
+
+            // Insert into AllEntries after target group's last entry to preserve order
+            int currentIndex = currentDocument.AllEntries.IndexOf(entry);
+            if (currentIndex >= 0)
+                currentDocument.AllEntries.RemoveAt(currentIndex);
+
+            int insertIndex = -1;
+            for (int i = 0; i < currentDocument.AllEntries.Count; i++)
+            {
+                var ae = currentDocument.AllEntries[i];
+                if (ae.Group == target.GroupName)
+                    insertIndex = i;
+            }
+            if (insertIndex >= 0 && insertIndex + 1 <= currentDocument.AllEntries.Count)
+                currentDocument.AllEntries.Insert(insertIndex + 1, entry);
+            else
+                currentDocument.AllEntries.Add(entry);
+
+            // Add to target group container
+            target.Entries.Add(entry);
+
+            documentIsDirty = true;
+            sceneRenderer.RenderDocument(currentDocument);
+            SelectEntry(entry);
+            SceneView.RepaintAll();
         }
         
         private void DrawRightPanel()
@@ -435,16 +589,22 @@ namespace Editor
             
             EditorGUI.BeginChangeCheck();
             
-            GUI.enabled = false;
-            EditorGUILayout.TextField("PID", entry.Pid);
-            GUI.enabled = true;
-            
-            var person = DisposDataLoader.Instance.GetPerson(entry.Pid);
-            if (person != null)
+            // Dispos identifier (only PID is editable here)
+            EditorGUILayout.BeginHorizontal();
+            GUI.SetNextControlName("PIDField");
+            string newPid = EditorGUILayout.TextField("PID", entry.Pid);
+            if (newPid != entry.Pid)
             {
-                EditorGUILayout.LabelField("Name", person.Name);
-                EditorGUILayout.LabelField("Gender", person.IsFemale ? "Female" : "Male");
+                entry.Pid = newPid;
             }
+            if (GUILayout.Button("Browse", GUILayout.Width(70)))
+            {
+                PersonLookupWindow.Show(pid => ApplyPidToSelected(pid));
+            }
+            EditorGUILayout.EndHorizontal();
+            // Inline suggestions removed; use Browse popup instead
+            
+            // Intentionally omit Person/Job readouts like Name/Gender to keep focus on Dispos data
             
             entry.Force = EditorGUILayout.IntPopup("Force", entry.Force, 
                 new string[] { "Player", "Enemy", "Ally", "Other" }, 
@@ -478,7 +638,41 @@ namespace Editor
             entry.LevelH = EditorGUILayout.IntField(entry.LevelH, GUILayout.Width(40));
             entry.LevelL = EditorGUILayout.IntField(entry.LevelL, GUILayout.Width(40));
             EditorGUILayout.EndHorizontal();
+
+            // Icon resolution readout
+            EditorGUILayout.Space();
+            EditorGUILayout.LabelField("Icon", EditorStyles.boldLabel);
+            string resolvedIcon = DisposDataLoader.Instance.GetUnitIconPath(entry);
+            EditorGUILayout.LabelField("Resolved File", string.IsNullOrEmpty(resolvedIcon) ? "(none)" : resolvedIcon + ".png");
             
+            EditorGUILayout.Space();
+            EditorGUILayout.LabelField("IDs & Stock", EditorStyles.boldLabel);
+            entry.Sid = EditorGUILayout.TextField("Sid", entry.Sid);
+            entry.Bid = EditorGUILayout.TextField("Bid", entry.Bid);
+            entry.Gid = EditorGUILayout.TextField("Gid", entry.Gid);
+            entry.HpStockCount = EditorGUILayout.IntField("HP Stock Count", entry.HpStockCount);
+
+            EditorGUILayout.Space();
+            EditorGUILayout.LabelField("States", EditorStyles.boldLabel);
+            // Draw as 2 rows of 3 with comfortable spacing
+            float prevLabelWidth = EditorGUIUtility.labelWidth;
+            EditorGUIUtility.labelWidth = 20f;
+            EditorGUILayout.BeginVertical();
+            for (int row = 0; row < 2; row++)
+            {
+                EditorGUILayout.BeginHorizontal();
+                GUILayout.Space(6);
+                for (int col = 0; col < 3; col++)
+                {
+                    int idx = row * 3 + col;
+                    entry.States[idx] = EditorGUILayout.IntField($"S{idx}", entry.States[idx], GUILayout.Width(90));
+                    GUILayout.Space(10);
+                }
+                EditorGUILayout.EndHorizontal();
+            }
+            EditorGUILayout.EndVertical();
+            EditorGUIUtility.labelWidth = prevLabelWidth;
+
             EditorGUILayout.Space();
             EditorGUILayout.LabelField("Items", EditorStyles.boldLabel);
             
@@ -492,14 +686,41 @@ namespace Editor
             
             EditorGUILayout.Space();
             EditorGUILayout.LabelField("AI Settings", EditorStyles.boldLabel);
-            
+
             entry.AI_ActionName = EditorGUILayout.TextField("Action", entry.AI_ActionName);
+            entry.AI_ActionVal = EditorGUILayout.TextField("Action Arg", entry.AI_ActionVal);
             entry.AI_MindName = EditorGUILayout.TextField("Mind", entry.AI_MindName);
+            entry.AI_MindVal = EditorGUILayout.TextField("Mind Arg", entry.AI_MindVal);
             entry.AI_AttackName = EditorGUILayout.TextField("Attack", entry.AI_AttackName);
+            entry.AI_AttackVal = EditorGUILayout.TextField("Attack Arg", entry.AI_AttackVal);
             entry.AI_MoveName = EditorGUILayout.TextField("Move", entry.AI_MoveName);
+            entry.AI_MoveVal = EditorGUILayout.TextField("Move Arg", entry.AI_MoveVal);
             entry.AI_BattleRate = EditorGUILayout.TextField("Battle Rate", entry.AI_BattleRate);
             entry.AI_Priority = EditorGUILayout.IntField("Priority", entry.AI_Priority);
+            entry.AI_HealRateA = EditorGUILayout.IntField("Heal Rate A", entry.AI_HealRateA);
+            entry.AI_HealRateB = EditorGUILayout.IntField("Heal Rate B", entry.AI_HealRateB);
             entry.AI_BandNo = EditorGUILayout.IntField("Band No", entry.AI_BandNo);
+            entry.AI_MoveLimit = EditorGUILayout.TextField("Move Limit", entry.AI_MoveLimit);
+            entry.AI_Flag = EditorGUILayout.IntField("AI Flag", entry.AI_Flag);
+            entry.AI_Active = EditorGUILayout.TextField("AI Active", entry.AI_Active);
+            entry.AI_ActiveTurn = EditorGUILayout.IntField("AI Active Turn", entry.AI_ActiveTurn);
+            entry.AI_ActiveFlag = EditorGUILayout.TextField("AI Active Flag", entry.AI_ActiveFlag);
+
+            // Additional attributes (if present)
+            var extras = entry.GetAllAdditionalAttributes();
+            if (extras != null && extras.Count > 0)
+            {
+                EditorGUILayout.Space();
+                EditorGUILayout.LabelField("Additional Attributes", EditorStyles.boldLabel);
+                foreach (var kv in extras)
+                {
+                    string newVal = EditorGUILayout.TextField(kv.Key, kv.Value);
+                    if (newVal != kv.Value)
+                    {
+                        entry.SetAdditionalAttribute(kv.Key, newVal);
+                    }
+                }
+            }
 
             EditorGUILayout.Space();
             EditorGUILayout.LabelField("Flags", EditorStyles.boldLabel);
@@ -532,6 +753,22 @@ namespace Editor
                 sceneRenderer.RenderDocument(currentDocument);
                 SceneView.RepaintAll();
             }
+        }
+
+        private void ApplyPidToSelected(string pid)
+        {
+            if (selectedEntry == null) return;
+            undoProxy?.RecordUndo("Change PID");
+            selectedEntry.Pid = pid;
+            // If Jid is empty, seed with person default Jid
+            var person = DisposDataLoader.Instance.GetPerson(pid);
+            if (person != null && string.IsNullOrEmpty(selectedEntry.Jid))
+            {
+                selectedEntry.Jid = person.Jid;
+            }
+            MarkDocumentDirty();
+            sceneRenderer.RenderDocument(currentDocument);
+            Repaint();
         }
 
         private int DrawFlagToggle(int flags, string label, int bit)
@@ -694,6 +931,14 @@ namespace Editor
                         var e1 = sceneRenderer.GetEntryAtPosition(worldPos);
                         if (e1 != null) {
                             entries = new List<DisposEntry> { e1 };
+                        } else if (sceneRenderer.TryGetTileFromWorld(worldPos, out var emptyTile)) {
+                            // Select an empty tile for placement
+                            hasSelectedTile = true;
+                            selectedTile = emptyTile;
+                            sceneRenderer.SetSelectedTile(emptyTile);
+                            SelectEntry(null);
+                            e.Use();
+                            return;
                         }
                     }
                 }
@@ -728,13 +973,18 @@ namespace Editor
                                 draggedEntry = target;
                             }
                         }
+                        // Clear any empty tile highlight when selecting a unit
+                        hasSelectedTile = false;
+                        sceneRenderer.SetSelectedTile(null);
                         e.Use();
                     }
                 }
                 else
                 {
-                    // Clicked on empty space - clear selection
+                    // Clicked on empty space - clear selection and any tile highlight
                     SelectEntry(null);
+                    hasSelectedTile = false;
+                    sceneRenderer.SetSelectedTile(null);
                     e.Use();
                 }
             }
@@ -983,6 +1233,9 @@ namespace Editor
         {
             selectedEntry = entry;
             sceneRenderer.SelectedEntry = entry;
+            // Clear any empty tile selection when focusing a unit
+            hasSelectedTile = false;
+            sceneRenderer.SetSelectedTile(null);
             
             // Find and select the corresponding GameObject
             if (entry != null)

@@ -18,6 +18,8 @@ namespace Editor
         private DisposEntry selectedEntry;
         private DisposEntry hoverEntry; // transient highlight from picker
         private Dictionary<Vector2Int, DisposEntry> tileTopEntries = new Dictionary<Vector2Int, DisposEntry>(); // Track which entry should be on top for each tile
+        private bool hasSelectedTile = false;
+        private Vector2Int selectedTile;
         private Vector3 worldOffset = Vector3.zero;
         private const float LABEL_SCREEN_OFFSET_Y = -35f; // pixels below sprite
         private const float ICON_TILE_SCALE = 0.9f;      // fraction of tile used for icon size
@@ -67,11 +69,12 @@ namespace Editor
         
         private void RefreshUnits()
         {
-            Debug.Log($"RefreshUnits called. Document: {currentDocument != null}, Groups: {currentDocument?.Groups?.Count ?? 0}");
+            // Debug: uncomment for troubleshooting
+            // Debug.Log($"RefreshUnits called. Document: {currentDocument != null}, Groups: {currentDocument?.Groups?.Count ?? 0}");
             
             if (currentDocument == null)
             {
-                Debug.LogWarning("No document to refresh");
+                // Debug.LogWarning("No document to refresh");
                 tileTopEntries.Clear(); // Clear when no document
                 return;
             }
@@ -121,7 +124,7 @@ namespace Editor
                 foreach (var entry in group.Entries)
                     if (!entry.IsGroupHeader) entries++;
             }
-            Debug.Log($"RefreshUnits immediate-mode. Entries visible: {entries}");
+            // Debug.Log($"RefreshUnits immediate-mode. Entries visible: {entries}");
         }
         
         private GameObject CreateGroupObject(DisposGroup group) { return null; }
@@ -253,6 +256,29 @@ namespace Editor
                 Vector3 start = new Vector3(startX + col * TILE_SIZE, y + 0.01f, startZ);
                 Vector3 end = new Vector3(startX + col * TILE_SIZE, y + 0.01f, startZ + height * TILE_SIZE);
                 Handles.DrawLine(start, end, 1f);
+            }
+
+            // Highlight a selected empty tile if any
+            if (hasSelectedTile)
+            {
+                float tileX = startX + selectedTile.x * TILE_SIZE;
+                float tileZ = startZ + selectedTile.y * TILE_SIZE;
+                Vector2 p0 = HandleUtility.WorldToGUIPoint(new Vector3(tileX, y, tileZ));
+                Vector2 p1 = HandleUtility.WorldToGUIPoint(new Vector3(tileX + TILE_SIZE, y, tileZ));
+                Vector2 p2 = HandleUtility.WorldToGUIPoint(new Vector3(tileX + TILE_SIZE, y, tileZ + TILE_SIZE));
+                Vector2 p3 = HandleUtility.WorldToGUIPoint(new Vector3(tileX, y, tileZ + TILE_SIZE));
+                float minX = Mathf.Min(Mathf.Min(p0.x, p1.x), Mathf.Min(p2.x, p3.x));
+                float maxX = Mathf.Max(Mathf.Max(p0.x, p1.x), Mathf.Max(p2.x, p3.x));
+                float minY = Mathf.Min(Mathf.Min(p0.y, p1.y), Mathf.Min(p2.y, p3.y));
+                float maxY = Mathf.Max(Mathf.Max(p0.y, p1.y), Mathf.Max(p2.y, p3.y));
+                Rect r = new Rect(minX, minY, maxX - minX, maxY - minY);
+                Handles.BeginGUI();
+                Color c = new Color(0.2f, 0.85f, 0.95f, 0.9f);
+                EditorGUI.DrawRect(new Rect(r.xMin, r.yMin, r.width, 2f), c);
+                EditorGUI.DrawRect(new Rect(r.xMin, r.yMax - 2f, r.width, 2f), c);
+                EditorGUI.DrawRect(new Rect(r.xMin, r.yMin, 2f, r.height), c);
+                EditorGUI.DrawRect(new Rect(r.xMax - 2f, r.yMin, 2f, r.height), c);
+                Handles.EndGUI();
             }
         }
         
@@ -403,6 +429,20 @@ namespace Editor
         public void SetGuiOcclusionRect(Rect r)
         {
             guiOcclusionRect = r;
+        }
+
+        public void SetSelectedTile(Vector2Int? tile)
+        {
+            if (tile.HasValue)
+            {
+                selectedTile = tile.Value;
+                hasSelectedTile = true;
+            }
+            else
+            {
+                hasSelectedTile = false;
+            }
+            SceneView.RepaintAll();
         }
 
         private bool IsEntryVisible(DisposEntry entry)
